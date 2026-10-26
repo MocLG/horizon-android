@@ -153,3 +153,33 @@ fn directions_follow_the_angle() {
     assert_eq!(direction((-7.0, 7.0), c, 1.0), Some(Direction::SouthWest));
     assert_eq!(direction((0.5, 0.0), c, 1.0), None);
 }
+
+#[test]
+fn the_editor_adds_and_moves_a_button() {
+    use super::editor::{Editor, Outcome};
+    let mut e = Editor::new(Controls::default_layout());
+    let hud = |e: &mut Editor| {
+        // Drawing lays out the toolbar and panel the taps land on.
+        let atlas = crate::hud::HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets")).unwrap();
+        let mut batch = HudBatch::new([SCREEN.width as u32, SCREEN.height as u32]);
+        e.draw(&mut batch, &atlas, SCREEN);
+    };
+    hud(&mut e);
+    let before: usize = e.layout().layers[0].normal_buttons.len();
+    let add = e.add_button_at().expect("the toolbar has Add button");
+    e.down(9, add, SCREEN);
+    e.up(9, add, SCREEN);
+    let added = e.layout().layers[0].normal_buttons.len() > before;
+    assert!(added, "the toolbar added no button");
+    let (l, i) = (0, e.layout().layers[0].normal_buttons.len() - 1);
+    // Drag it from the middle to the left edge.
+    let r = e.controls.button_rect((l, i), SCREEN);
+    let from = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+    e.down(1, from, SCREEN);
+    e.moved(1, (from.0 - 5000.0, from.1), SCREEN);
+    assert_eq!(e.up(1, (from.0 - 5000.0, from.1), SCREEN), Outcome::None);
+    assert_eq!(e.layout().layers[l].normal_buttons[i].position.x, 0);
+    let saved = e.layout().to_json();
+    let layout = Layout::parse(&saved).unwrap();
+    assert_eq!(layout.layers[l].normal_buttons.len(), before + 1);
+}

@@ -8,6 +8,9 @@
 //! it leaves; a toggle flips with each press; a penetrable one lets the
 //! finger look around too. Layer events act when a button goes down.
 //! Everything is in physical pixels.
+pub mod editor;
+pub mod menu;
+mod widgets;
 pub mod layout;
 
 use crate::hud::{HudAtlas, HudBatch};
@@ -115,6 +118,10 @@ pub struct Controls {
     events: Vec<Event>,
     /// The system's language, for the buttons' translated text.
     pub language: String,
+    /// Layers that hide while a gamepad plays do so.
+    pub gamepad: bool,
+    /// Every layer and widget, hidden or not (the editor).
+    show_all: bool,
 }
 
 impl Controls {
@@ -136,6 +143,8 @@ impl Controls {
             measured: HashMap::new(),
             events: Vec::new(),
             language: String::new(),
+            gamepad: false,
+            show_all: false,
         }
     }
 
@@ -149,7 +158,15 @@ impl Controls {
     }
 
     fn layer_shown(&self, layer: usize, in_game: bool) -> bool {
-        !self.hidden[layer] && self.layout.layers[layer].visibility_type.shown(in_game)
+        let l = &self.layout.layers[layer];
+        self.show_all
+            || (!self.hidden[layer]
+                && l.visibility_type.shown(in_game)
+                && !(self.gamepad && l.hide_when_gamepad))
+    }
+
+    fn shown(&self, visibility: Visibility, in_game: bool) -> bool {
+        self.show_all || visibility.shown(in_game)
     }
 
     fn size(&self, size: &Size, uuid: &str, screen: Screen) -> (f32, f32) {
@@ -211,7 +228,7 @@ impl Controls {
                 continue;
             }
             for (i, b) in layer.normal_buttons.iter().enumerate().rev() {
-                if b.visibility_type.shown(in_game) {
+                if self.shown(b.visibility_type, in_game) {
                     ids.push((l, i));
                 }
             }
@@ -530,7 +547,7 @@ impl Controls {
             }
             let layer = self.layout.layers[l].clone();
             for t in &layer.text_boxes {
-                if t.visibility_type.shown(in_game) {
+                if self.shown(t.visibility_type, in_game) {
                     let size = self.size(&t.button_size, &t.uuid, screen);
                     self.widget(
                         &mut ui,
@@ -552,7 +569,7 @@ impl Controls {
                 }
             }
             for (i, b) in layer.normal_buttons.iter().enumerate() {
-                if b.visibility_type.shown(in_game) {
+                if self.shown(b.visibility_type, in_game) {
                     let size = self.size(&b.button_size, &b.uuid, screen);
                     self.widget(
                         &mut ui,
@@ -574,7 +591,7 @@ impl Controls {
                 }
             }
             for (i, j) in layer.joystick_buttons.iter().enumerate() {
-                if j.visibility_type.shown(in_game) {
+                if self.shown(j.visibility_type, in_game) {
                     self.draw_stick(&mut ui, (l, i), screen, opacity);
                 }
             }
