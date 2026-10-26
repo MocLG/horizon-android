@@ -25,6 +25,15 @@ const RENEW_BEFORE: u64 = 3600;
 /// The configured Azure app, if any: the run-time variable wins over the build-time one, and an
 /// empty value means none.
 pub fn client_id() -> Option<String> {
+    // The Android app has no environment to set: its settings keep the ID in a file.
+    #[cfg(target_os = "android")]
+    if let Some(id) = std::fs::read_to_string(crate::backend::data_dir().join("client-id.txt"))
+        .ok()
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+    {
+        return Some(id);
+    }
     std::env::var("HORIZON_MSA_CLIENT_ID")
         .ok()
         .or_else(|| option_env!("HORIZON_MSA_CLIENT_ID").map(str::to_owned))
@@ -599,6 +608,50 @@ impl SecretStore for SystemStore {
     }
 }
 
+/// On Android the app's private storage is the keychain: no other app can read it.
+#[cfg(target_os = "android")]
+pub struct SystemStore;
+#[cfg(target_os = "android")]
+impl SystemStore {
+    fn path() -> PathBuf {
+        crate::backend::data_dir().join("secrets.json")
+    }
+    fn read() -> HashMap<String, String> {
+        std::fs::read_to_string(Self::path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+    fn write(secrets: &HashMap<String, String>) -> Result<(), String> {
+        let path = Self::path();
+        let partial = path.with_extension("partial");
+        let text = serde_json::to_string(secrets).map_err(|e| e.to_string())?;
+        std::fs::write(&partial, text).map_err(|e| e.to_string())?;
+        std::fs::rename(&partial, &path).map_err(|e| e.to_string())
+    }
+}
+#[cfg(target_os = "android")]
+impl SecretStore for SystemStore {
+    fn get(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(Self::read().remove(key))
+    }
+    fn set(&self, key: &str, secret: &str) -> Result<(), String> {
+        let mut secrets = Self::read();
+        secrets.insert(key.into(), secret.into());
+        Self::write(&secrets)
+    }
+    fn delete(&self, key: &str) -> Result<(), String> {
+        let mut secrets = Self::read();
+        if secrets.remove(key).is_some() {
+            Self::write(&secrets)?;
+        }
+        Ok(())
+    }
+    fn persistent(&self) -> bool {
+        true
+    }
+}
+
 pub const NO_KEYCHAIN: &str = "No keychain available: you are signed in until the launcher closes, then you will have to sign in again.";
 
 /// The keychain if it answers, else memory for this run (said once in the UI with NO_KEYCHAIN).
@@ -610,7 +663,8 @@ pub fn store() -> &'static dyn SecretStore {
                 target_os = "linux",
                 target_os = "freebsd",
                 target_os = "macos",
-                target_os = "windows"
+                target_os = "windows",
+                target_os = "android"
             ))]
             if std::env::var_os("HORIZON_NO_KEYCHAIN").is_none() && SystemStore.get("probe").is_ok()
             {
