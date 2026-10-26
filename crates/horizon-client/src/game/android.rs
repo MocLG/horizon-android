@@ -702,6 +702,21 @@ impl AndroidGame {
                         continue;
                     };
                     if let App::Ready(game) = &mut self.app {
+                        // As a keyboard's key goes (window_event): held for the F3
+                        // combinations, the debug keys first, then the game's.
+                        if pressed {
+                            game.physical_keys.insert(key);
+                        } else {
+                            game.physical_keys.remove(&key);
+                        }
+                        let action = if pressed {
+                            horizon_client::debug_keys::KeyAction::Press
+                        } else {
+                            horizon_client::debug_keys::KeyAction::Release
+                        };
+                        if game.debug_key(key, action) {
+                            continue;
+                        }
                         if key == KeyCode::Escape {
                             if pressed {
                                 let _ = game.pad_back();

@@ -145,7 +145,22 @@ impl Task {
     }
 }
 
+/// A download, tried three times: a phone's connection drops more often than a desktop's.
 fn fetch(url: &str) -> Result<Vec<u8>, String> {
+    let mut last = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(2 * attempt));
+        }
+        match fetch_once(url) {
+            Ok(body) => return Ok(body),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+fn fetch_once(url: &str) -> Result<Vec<u8>, String> {
     let response = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(20))
         .timeout_read(std::time::Duration::from_secs(60))
@@ -247,6 +262,11 @@ fn server_jar(paths: &Paths, minecraft: &Path, log: &dyn Fn(String)) -> Result<P
     let jar = paths.server_jar();
     if jar.is_file() {
         return Ok(jar);
+    }
+    // One copied over with the Minecraft folder.
+    let copied = minecraft.join("server.jar");
+    if copied.is_file() {
+        return Ok(copied);
     }
     let v = horizon_core::VANILLA_VERSION;
     let manifest = minecraft.join("versions").join(v).join(format!("{v}.json"));
