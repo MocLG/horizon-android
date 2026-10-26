@@ -31,6 +31,7 @@ fn take_crash(paths: &install::Paths) -> Option<String> {
 #[allow(unsafe_code)]
 pub fn main(app: AndroidApp) {
     logcat::redirect();
+    jni::set_activity(&app);
     let paths = install::Paths::new(&app);
     backend::set_data_dir(paths.data.clone());
     for dir in [&paths.data, &paths.home, &paths.cache] {

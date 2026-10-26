@@ -86,13 +86,23 @@ pub fn gyroscope(on: bool) {
     platform("gyroscope", if on { "1" } else { "0" });
 }
 
+/// The activity, as android-activity holds it (its context is the Application).
+static ACTIVITY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn set_activity(app: &winit::platform::android::activity::AndroidApp) {
+    ACTIVITY.store(app.activity_as_ptr() as usize, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Calls `HorizonActivity.platform(op, arg)`; `None` when it returned null or failed.
 pub fn platform(op: &str, arg: &str) -> Option<String> {
     let context = ndk_context::android_context();
-    // SAFETY: android-activity put the process's JavaVM and the activity in the
-    // context before android_main, and both live as long as the process.
+    // SAFETY: android-activity put the process's JavaVM in the context before
+    // android_main, and it lives as long as the process.
     let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
-    let activity = context.context() as jni::sys::jobject;
+    let activity = ACTIVITY.load(std::sync::atomic::Ordering::Relaxed) as jni::sys::jobject;
+    if activity.is_null() {
+        return None;
+    }
     let result = vm.attach_current_thread(|env| -> jni::errors::Result<Option<String>> {
         // SAFETY: a global reference to the activity, valid for the call.
         let activity = unsafe { env.as_cast_raw::<JObject<'static>>(&activity) }?;
