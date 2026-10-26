@@ -557,6 +557,11 @@ pub struct HudVertex {
 }
 /// The GUI Scale option (0 = auto).
 pub static GUI_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The GUI's smallest size in GUI pixels, which caps the scale: vanilla's
+/// 320x240. Horizon's larger interface on phones lowers the height (240 is
+/// about 3 mm text on a phone).
+pub static GUI_MIN_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(240);
+pub const GUI_MIN_WIDTH: u32 = 320;
 /// One frame of overlay geometry in GUI pixels.
 pub struct HudBatch {
     pub vertices: Vec<HudVertex>,
@@ -607,8 +612,8 @@ impl HudBatch {
         let limit = GUI_SCALE.load(std::sync::atomic::Ordering::Relaxed);
         let mut scale = 1;
         while (limit == 0 || scale < limit)
-            && window[0] / (scale + 1) >= 320
-            && window[1] / (scale + 1) >= 240
+            && window[0] / (scale + 1) >= GUI_MIN_WIDTH
+            && window[1] / (scale + 1) >= GUI_MIN_HEIGHT.load(std::sync::atomic::Ordering::Relaxed)
         {
             scale += 1;
         }

@@ -122,6 +122,9 @@ pub struct Controls {
     pub gamepad: bool,
     /// Every layer and widget, hidden or not (the editor).
     show_all: bool,
+    /// The widgets' size against the layout's: the player's, or what fits
+    /// a layout made for a larger screen (`fitting_size`).
+    pub size: f32,
 }
 
 impl Controls {
@@ -145,6 +148,7 @@ impl Controls {
             language: String::new(),
             gamepad: false,
             show_all: false,
+            size: 1.0,
         }
     }
 
@@ -174,11 +178,15 @@ impl Controls {
             Reference::ScreenWidth => screen.width,
             Reference::ScreenHeight => screen.height,
         };
+        let k = if self.show_all { 1.0 } else { self.size };
         match size.kind {
-            SizeType::Dp => (size.width_dp * screen.density, size.height_dp * screen.density),
+            SizeType::Dp => (
+                size.width_dp * screen.density * k,
+                size.height_dp * screen.density * k,
+            ),
             SizeType::Percentage => (
-                reference(size.width_reference) * size.width_percentage as f32 / 10000.0,
-                reference(size.height_reference) * size.height_percentage as f32 / 10000.0,
+                reference(size.width_reference) * size.width_percentage as f32 / 10000.0 * k,
+                reference(size.height_reference) * size.height_percentage as f32 / 10000.0 * k,
             ),
             SizeType::WrapContent => self
                 .measured
@@ -205,7 +213,8 @@ impl Controls {
 
     fn stick_rect(&self, (l, i): Id, screen: Screen) -> Rect {
         let j = &self.layout.layers[l].joystick_buttons[i];
-        let side = match j.size_type {
+        let k = if self.show_all { 1.0 } else { self.size };
+        let side = k * match j.size_type {
             SizeType::Dp => j.size_dp.max(20.0) * screen.density,
             SizeType::Percentage => screen.height * j.size_percentage.max(2000) as f32 / 10000.0,
             SizeType::WrapContent => 200.0 * screen.density,
@@ -234,6 +243,35 @@ impl Controls {
             }
         }
         ids
+    }
+
+    /// The largest size, in steps of 5% down to half, at which no two
+    /// buttons overlap by more than 3% of the smaller: a layout made on a
+    /// wider screen than this one fits. One that overlaps by design at any
+    /// size keeps its own.
+    pub fn fitting_size(&mut self, screen: Screen) -> f32 {
+        let before = self.size;
+        let mut fit = 1.0;
+        for step in 0..=10 {
+            self.size = 1.0 - step as f32 * 0.05;
+            let rects: Vec<Rect> = (0..self.layout.layers.len())
+                .flat_map(|l| (0..self.layout.layers[l].normal_buttons.len()).map(move |i| (l, i)))
+                .map(|id| self.button_rect(id, screen))
+                .collect();
+            let overlapping = rects.iter().enumerate().any(|(i, a)| {
+                rects[i + 1..].iter().any(|b| {
+                    let w = (a.x + a.w).min(b.x + b.w) - a.x.max(b.x);
+                    let h = (a.y + a.h).min(b.y + b.h) - a.y.max(b.y);
+                    w > 1.0 && h > 1.0 && w * h > 0.03 * (a.w * a.h).min(b.w * b.h)
+                })
+            });
+            if !overlapping {
+                fit = self.size;
+                break;
+            }
+        }
+        self.size = before;
+        fit
     }
 
     fn button(&self, (l, i): Id) -> &Button {

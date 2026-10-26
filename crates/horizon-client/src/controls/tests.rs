@@ -183,3 +183,37 @@ fn the_editor_adds_and_moves_a_button() {
     let layout = Layout::parse(&saved).unwrap();
     assert_eq!(layout.layers[l].normal_buttons.len(), before + 1);
 }
+
+#[test]
+fn auto_size_keeps_the_default_and_shrinks_a_crowded_layout() {
+    let mut c = Controls::default_layout();
+    assert_eq!(c.fitting_size(SCREEN), 1.0);
+    // Two 100 dp buttons a tenth of the free width apart, as a layout made
+    // for a wider screen places them.
+    let mut layout = c.layout.clone();
+    let mut a = layout.layers[1].normal_buttons[0].clone();
+    a.button_size.kind = SizeType::Dp;
+    a.button_size.width_dp = 100.0;
+    a.button_size.height_dp = 40.0;
+    a.position = Position { x: 0, y: 5000 };
+    let mut b = a.clone();
+    b.position.x = 1000;
+    layout.layers = vec![Layer {
+        normal_buttons: vec![a, b],
+        ..layout.layers[1].clone()
+    }];
+    let mut crowded = Controls::new(layout);
+    let fit = crowded.fitting_size(SCREEN);
+    assert!(fit < 1.0 && fit >= 0.5, "{fit}");
+}
+
+#[test]
+fn older_layouts_are_updated_as_zalith_updates_them() {
+    let mut json: serde_json::Value = serde_json::from_str(DEFAULT_LAYOUT).unwrap();
+    json["editorVersion"] = 1.into();
+    let x = json["layers"][1]["normalButtons"][1]["position"]["x"].as_i64().unwrap();
+    json["layers"][1]["normalButtons"][1]["position"]["x"] = (x / 10).into();
+    let layout = Layout::parse(&json.to_string()).unwrap();
+    assert_eq!(i64::from(layout.layers[1].normal_buttons[1].position.x), x / 10 * 10);
+    assert!(layout.styles.iter().all(|s| !s.common_style));
+}

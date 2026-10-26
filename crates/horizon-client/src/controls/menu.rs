@@ -14,6 +14,12 @@ pub struct Settings {
     /// The controls' opacity, 0..1.
     pub opacity: f32,
     pub controls_hidden: bool,
+    /// The controls' size; none fits the layout to the screen.
+    pub size: Option<f32>,
+    /// The size Auto picked, to show.
+    pub fitted: f32,
+    /// GUI scales past vanilla's largest (Horizon's, off by default).
+    pub larger_interface: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,6 +29,8 @@ pub enum Choice {
     Gyroscope,
     Opacity,
     HideControls,
+    Size,
+    Interface,
     Keyboard,
     Pause,
     Close,
@@ -132,7 +140,7 @@ impl Menu {
             "H",
         );
         if self.open {
-            let w = 320.0 * d;
+            let w = 560.0 * d;
             let row = 40.0 * d;
             let on = |v: bool| if v { "on" } else { "off" };
             let items = [
@@ -141,6 +149,20 @@ impl Menu {
                 (format!("Gyroscope: {}", on(settings.gyroscope)), Choice::Gyroscope),
                 (format!("Controls opacity: {:.0}%", settings.opacity * 100.0), Choice::Opacity),
                 (
+                    match settings.size {
+                        None => format!("Controls size: Auto ({:.0}%)", settings.fitted * 100.0),
+                        Some(s) => format!("Controls size: {:.0}%", s * 100.0),
+                    },
+                    Choice::Size,
+                ),
+                (
+                    format!(
+                        "Interface: {}",
+                        if settings.larger_interface { "larger than vanilla" } else { "vanilla" }
+                    ),
+                    Choice::Interface,
+                ),
+                (
                     if settings.controls_hidden { "Show controls" } else { "Hide controls" }.to_owned(),
                     Choice::HideControls,
                 ),
@@ -148,7 +170,8 @@ impl Menu {
                 ("Pause".to_owned(), Choice::Pause),
                 ("Close".to_owned(), Choice::Close),
             ];
-            let h = row * items.len() as f32 + 56.0 * d;
+            let rows = items.len().div_ceil(2);
+            let h = row * rows as f32 + 56.0 * d;
             let p = Rect {
                 x: (screen.width - w) / 2.0,
                 y: ((screen.height - h) / 2.0).max(8.0 * d),
@@ -166,16 +189,15 @@ impl Menu {
                 MUTED,
                 "Drag the ball anywhere",
             );
-            let mut y = p.y + 48.0 * d;
-            for (label, choice) in items {
+            let column = (p.w - 34.0 * d) / 2.0;
+            for (n, (label, choice)) in items.into_iter().enumerate() {
                 let b = Rect {
-                    x: p.x + 14.0 * d,
-                    y,
-                    w: p.w - 28.0 * d,
+                    x: p.x + 14.0 * d + (n % 2) as f32 * (column + 6.0 * d),
+                    y: p.y + 48.0 * d + (n / 2) as f32 * row,
+                    w: column,
                     h: row - 6.0 * d,
                 };
                 widgets::button(&mut ui, &mut self.hits, b, &label, choice == Choice::EditControls, choice);
-                y += row;
             }
         }
         ui.finish();

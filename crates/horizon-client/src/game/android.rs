@@ -210,7 +210,13 @@ impl AndroidGame {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1.0),
             controls_hidden: false,
+            size: preference(&home, "touchSize")
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &f32| (0.3..=2.0).contains(v)),
+            fitted: 1.0,
+            larger_interface: flag(&home, "largerInterface", false),
         };
+        set_larger_interface(touch.larger_interface);
         let ball = preference(&home, "touchMenuBall")
             .and_then(|v| {
                 let (x, y) = v.split_once(',')?;
@@ -472,6 +478,11 @@ impl AndroidGame {
         }
         let enabled = self.enabled;
         let gyroscope = with_overlay(|o| {
+            if o.screen != screen || o.settings.fitted == 0.0 {
+                // A new screen: Auto fits the layout to it again.
+                o.settings.fitted = o.controls.fitting_size(screen);
+            }
+            o.controls.size = o.settings.size.unwrap_or(o.settings.fitted);
             o.screen = screen;
             o.in_game = in_game;
             o.shown = enabled;
@@ -821,6 +832,32 @@ impl AndroidGame {
                     o.controls.release_all();
                 });
             }
+            Choice::Size => {
+                let size = with_overlay(|o| {
+                    // Auto, then the sizes from the largest down.
+                    o.settings.size = match o.settings.size {
+                        None => Some(1.2),
+                        Some(v) if v > 0.65 => Some(((v - 0.1) * 10.0).round() / 10.0),
+                        Some(_) => None,
+                    };
+                    o.controls.release_all();
+                    o.settings.size
+                })
+                .flatten();
+                set_preference(&home, "touchSize", size.map(|v| v.to_string()).as_deref());
+            }
+            Choice::Interface => {
+                let on = with_overlay(|o| {
+                    o.settings.larger_interface = !o.settings.larger_interface;
+                    o.settings.larger_interface
+                })
+                .unwrap_or(false);
+                set_flag(&home, "largerInterface", on);
+                set_larger_interface(on);
+                if let Some(w) = self.window() {
+                    w.request_redraw();
+                }
+            }
             Choice::Keyboard => {
                 self.forced_keyboard = !self.forced_keyboard;
                 with_overlay(|o| o.menu.open = false);
@@ -1029,6 +1066,7 @@ impl AndroidGame {
                     let editor = o.editor.take()?;
                     let result = save_layout(&home, editor.layout());
                     o.controls = editor.into_controls();
+                    o.settings.fitted = 0.0;
                     Some(result)
                 })
                 .flatten();
@@ -1047,6 +1085,7 @@ impl AndroidGame {
                         let language = editor.into_controls().language;
                         o.controls = load_controls(&home);
                         o.controls.language = language;
+                        o.settings.fitted = 0.0;
                     }
                 });
                 self.keyboard = false;
@@ -1081,6 +1120,12 @@ fn load_controls_into(current: &Controls) -> Controls {
     let mut controls = load_controls(&home);
     controls.language = current.language.clone();
     controls
+}
+
+/// GUI scales past vanilla's largest, for a phone's small screen: the GUI's
+/// smallest height goes from vanilla's 240 GUI pixels to 160.
+fn set_larger_interface(on: bool) {
+    horizon_client::hud::GUI_MIN_HEIGHT.store(if on { 160 } else { 240 }, Ordering::Relaxed);
 }
 
 fn tap_key(game: &mut Game, key: KeyCode) {

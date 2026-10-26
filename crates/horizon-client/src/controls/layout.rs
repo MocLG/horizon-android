@@ -551,6 +551,30 @@ impl Layout {
                 dark_style: style,
             });
         }
+        // Zalith's own updates of older layouts (Version.kt).
+        if version < 2 {
+            // Positions and sizes went from 0..1000 to 0..10000.
+            for layer in &mut layout.layers {
+                for b in &mut layer.normal_buttons {
+                    b.position.x *= 10;
+                    b.position.y *= 10;
+                    b.button_size.width_percentage *= 10;
+                    b.button_size.height_percentage *= 10;
+                }
+                for t in &mut layer.text_boxes {
+                    t.position.x *= 10;
+                    t.position.y *= 10;
+                    t.button_size.width_percentage *= 10;
+                    t.button_size.height_percentage *= 10;
+                }
+            }
+        }
+        if version < 11 {
+            // Older styles had light and dark variants, picked by the system's theme.
+            for style in &mut layout.styles {
+                style.common_style = false;
+            }
+        }
         layout.editor_version = EDITOR_VERSION;
         Ok(layout)
     }

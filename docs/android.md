@@ -42,8 +42,12 @@ joystick, which locks forward and sprints when pushed past its top.
   signs, books and the other text fields, or with the IME button.
 - The ball over the game (drag it anywhere) opens the game menu: the layout
   editor, gestures (a tap uses, a hold breaks), the gyroscope (turning the
-  phone looks around), the controls' opacity, hiding the controls, the
-  keyboard and pause.
+  phone looks around), the controls' opacity and size, a larger interface,
+  hiding the controls, the keyboard and pause.
+- Controls size Auto shrinks a layout made for a wider screen until its
+  buttons stop overlapping, in steps of 5%. The larger interface lets the
+  GUI scale go past vanilla's largest (the GUI keeps 160 GUI pixels of
+  height instead of 240), with GUI Scale on Auto or set higher.
 - The layout editor shows every layer. Drag a widget to move it, tap it for
   its panel: label, size, the keys it sends, toggle, swipe, look through,
   where it shows, its style, duplicate and delete. The toolbar adds buttons,

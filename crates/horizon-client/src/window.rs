@@ -12,8 +12,9 @@ pub fn calculate_scale(framebuffer: [i32; 2], max_scale: i32, enforce_unicode: b
     while scale != max_scale
         && scale < width
         && scale < height
-        && width / (scale + 1) >= 320
-        && height / (scale + 1) >= 240
+        && width / (scale + 1) >= crate::hud::GUI_MIN_WIDTH as i32
+        && height / (scale + 1)
+            >= crate::hud::GUI_MIN_HEIGHT.load(std::sync::atomic::Ordering::Relaxed) as i32
     {
         scale += 1;
     }
