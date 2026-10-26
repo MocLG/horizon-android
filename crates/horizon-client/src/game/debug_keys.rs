@@ -284,6 +284,12 @@ impl Game<'_> {
             self.settings.force_unicode,
             [batch.width as i32, batch.height as i32],
         );
+        // A phone's cutout and curved edges hide the corners: the text keeps clear.
+        #[cfg(target_os = "android")]
+        let [left, top, right, _] = super::android::hud_margins().map(|m| m / batch.scale);
+        #[cfg(not(target_os = "android"))]
+        let [left, top, right] = [0.0f32; 3];
+        let width = width - ((left + right) / scale).ceil() as i32;
         let mut d = debug_overlay::Displayer::default();
         // fps: DebugEntryFps.
         let limit = self.framerate_limit();
@@ -454,9 +460,10 @@ impl Game<'_> {
                 ));
             }
         }
-        let (left, right) = d.columns(&self.debug_chart_lines());
+        let (left_lines, right_lines) = d.columns(&self.debug_chart_lines());
         let atlas = &self.gui.atlas;
-        let mut draws = debug_overlay::draw(&atlas.font, [&left, &right], scale, width);
+        let mut draws = vec![hud_layout::GuiDraw::Push(vec![hud_layout::PoseOp::Translate(left, top)])];
+        draws.extend(debug_overlay::draw(&atlas.font, [&left_lines, &right_lines], scale, width));
         let charts = self.debug_charts.draw(
             &atlas.font,
             width,
@@ -478,6 +485,7 @@ impl Game<'_> {
                 height,
             ));
         }
+        draws.push(hud_layout::GuiDraw::Pop);
         draws.push(hud_layout::GuiDraw::Pop);
         hud_layout::paint(batch, atlas, &draws);
     }

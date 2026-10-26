@@ -20,6 +20,8 @@ pub struct Settings {
     pub fitted: f32,
     /// GUI scales past vanilla's largest (Horizon's, off by default).
     pub larger_interface: bool,
+    /// Vanilla's `debugGuiScale`: -1 the GUI's, 0 half the largest, else a scale.
+    pub debug_scale: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,6 +33,7 @@ pub enum Choice {
     HideControls,
     Size,
     Interface,
+    DebugSize,
     Keyboard,
     Pause,
     Close,
@@ -161,6 +164,17 @@ impl Menu {
                         if settings.larger_interface { "larger than vanilla" } else { "vanilla" }
                     ),
                     Choice::Interface,
+                ),
+                (
+                    format!(
+                        "Debug screen (F3): {}",
+                        match settings.debug_scale {
+                            -1 => "as the GUI".to_owned(),
+                            0 => "vanilla's".to_owned(),
+                            n => format!("scale {n}"),
+                        }
+                    ),
+                    Choice::DebugSize,
                 ),
                 (
                     if settings.controls_hidden { "Show controls" } else { "Hide controls" }.to_owned(),

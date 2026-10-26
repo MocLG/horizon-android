@@ -49,6 +49,14 @@ thread_local! {
     static OVERLAY: RefCell<Option<Overlay>> = const { RefCell::new(None) };
     /// The gamepad as the activity's events left it.
     static GAMEPAD: Cell<PadState> = Cell::new(PadState::default());
+    /// Where text at the screen's edges stays clear of, physical pixels:
+    /// left, top, right, bottom.
+    static HUD_MARGINS: Cell<[f32; 4]> = const { Cell::new([0.0; 4]) };
+}
+
+/// The margins the debug screen keeps from the edges (`game/debug_keys.rs`).
+pub(crate) fn hud_margins() -> [f32; 4] {
+    HUD_MARGINS.with(Cell::get)
 }
 
 /// The gamepad, for the game's controller support (`game/pad.rs`).
@@ -215,7 +223,24 @@ impl AndroidGame {
                 .filter(|v: &f32| (0.3..=2.0).contains(v)),
             fitted: 1.0,
             larger_interface: flag(&home, "largerInterface", false),
+            debug_scale: settings.file.int("debugGuiScale"),
         };
+        // Text at the edges clears the camera's cutout and the screen's
+        // rounded corners and curved sides.
+        let insets: Vec<f32> = jni::platform("insets", "")
+            .unwrap_or_default()
+            .split(',')
+            .map(|v| v.parse().unwrap_or(0.0))
+            .collect();
+        let inset = |i: usize| insets.get(i).copied().unwrap_or(0.0);
+        HUD_MARGINS.with(|m| {
+            m.set([
+                inset(0).max(16.0 * dp),
+                inset(1).max(6.0 * dp),
+                inset(2).max(16.0 * dp),
+                inset(3),
+            ])
+        });
         set_larger_interface(touch.larger_interface);
         let ball = preference(&home, "touchMenuBall")
             .and_then(|v| {
@@ -856,6 +881,24 @@ impl AndroidGame {
                 set_larger_interface(on);
                 if let Some(w) = self.window() {
                     w.request_redraw();
+                }
+            }
+            Choice::DebugSize => {
+                let next = with_overlay(|o| {
+                    o.settings.debug_scale = match o.settings.debug_scale {
+                        0 => 3,
+                        n @ 3..=5 => n + 1,
+                        6 => -1,
+                        _ => 0,
+                    };
+                    o.settings.debug_scale
+                })
+                .unwrap_or(0);
+                if let App::Ready(game) = &mut self.app {
+                    game.settings
+                        .file
+                        .set("debugGuiScale", horizon_client::options_file::V::Int(next));
+                    game.settings.save(&Game::options_path());
                 }
             }
             Choice::Keyboard => {
