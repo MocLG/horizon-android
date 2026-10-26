@@ -40,6 +40,16 @@ joystick, which locks forward and sprints when pushed past its top.
   clicks where it points and a long press holds the button.
 - The back gesture does what Escape does. The soft keyboard opens with chat,
   signs, books and the other text fields, or with the IME button.
+- The ball over the game (drag it anywhere) opens the game menu: the layout
+  editor, gestures (a tap uses, a hold breaks), the gyroscope (turning the
+  phone looks around), the controls' opacity, hiding the controls, the
+  keyboard and pause.
+- The layout editor shows every layer. Drag a widget to move it, tap it for
+  its panel: label, size, the keys it sends, toggle, swipe, look through,
+  where it shows, its style, duplicate and delete. The toolbar adds buttons,
+  joysticks and layers and saves the layout as a file of its own.
+- A gamepad plays with Horizon's controller support, and layers set to hide
+  for one do while it is in use.
 
 Layouts exported from Zalith Launcher 2 load as they are. Copy their `.json`
 files to `Android/data/com.lukagejak.horizon/files/controls` and press

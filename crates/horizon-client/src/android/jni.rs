@@ -63,6 +63,29 @@ extern "system" fn Java_com_lukagejak_horizon_HorizonActivity_nativeKey<'caller>
     }
 }
 
+static GYRO: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_lukagejak_horizon_HorizonActivity_nativeGyro<'caller>(
+    _env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    x: jni::sys::jfloat,
+    y: jni::sys::jfloat,
+) {
+    let mut gyro = GYRO.lock().unwrap();
+    gyro.0 += x;
+    gyro.1 += y;
+}
+
+/// How far the phone turned, in radians, since the last call.
+pub fn take_gyro() -> (f32, f32) {
+    std::mem::take(&mut *GYRO.lock().unwrap())
+}
+
+pub fn gyroscope(on: bool) {
+    platform("gyroscope", if on { "1" } else { "0" });
+}
+
 /// Calls `HorizonActivity.platform(op, arg)`; `None` when it returned null or failed.
 pub fn platform(op: &str, arg: &str) -> Option<String> {
     let context = ndk_context::android_context();

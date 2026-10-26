@@ -6,6 +6,10 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -44,7 +48,11 @@ public class HorizonActivity extends NativeActivity {
     /** A key the soft keyboard pressed: 1 is backspace, 2 is enter, 3 is the back gesture. */
     static native void nativeKey(int key);
 
+    /** The phone turned by (x, y) radians since the last call: the gyroscope's look. */
+    static native void nativeGyro(float x, float y);
+
     private TextSink sink;
+    private SensorEventListener gyroscope;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -123,6 +131,9 @@ public class HorizonActivity extends NativeActivity {
             case "keyboard":
                 runOnUiThread(() -> keyboard(arg.equals("1")));
                 return null;
+            case "gyroscope":
+                runOnUiThread(() -> gyroscope(arg.equals("1")));
+                return null;
             case "toast":
                 runOnUiThread(() -> Toast.makeText(this, arg, Toast.LENGTH_LONG).show());
                 return null;
@@ -170,6 +181,42 @@ public class HorizonActivity extends NativeActivity {
         }
         CharSequence text = clip.getItemAt(0).coerceToText(this);
         return text == null ? "" : text.toString();
+    }
+
+    /** Turning the phone looks around, as in Zalith Launcher 2: its X axis turns, its Y axis tilts. */
+    private void gyroscope(boolean on) {
+        SensorManager sensors = getSystemService(SensorManager.class);
+        if (sensors == null) {
+            return;
+        }
+        if (gyroscope != null) {
+            sensors.unregisterListener(gyroscope);
+            gyroscope = null;
+        }
+        Sensor sensor = sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+        if (!on || sensor == null) {
+            return;
+        }
+        gyroscope = new SensorEventListener() {
+            private long last;
+
+            @Override
+            public void onSensorChanged(SensorEvent event) {
+                if (last != 0) {
+                    float seconds = (event.timestamp - last) / 1e9f;
+                    // The other landscape turns the axes round.
+                    float sign = getWindowManager().getDefaultDisplay().getRotation()
+                            == android.view.Surface.ROTATION_270 ? -1f : 1f;
+                    nativeGyro(sign * event.values[0] * seconds, sign * event.values[1] * seconds);
+                }
+                last = event.timestamp;
+            }
+
+            @Override
+            public void onAccuracyChanged(Sensor sensor, int accuracy) {
+            }
+        };
+        sensors.registerListener(gyroscope, sensor, SensorManager.SENSOR_DELAY_GAME);
     }
 
     private void vibrate(int millis) {

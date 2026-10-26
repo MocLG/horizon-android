@@ -66,6 +66,10 @@ mod hardware {
 
     impl Pads {
         pub(super) fn read(&mut self) -> PadState {
+            // On Android the activity's gamepad events (game/android.rs).
+            #[cfg(target_os = "android")]
+            return super::super::android::gamepad();
+            #[cfg(not(target_os = "android"))]
             PadState::default()
         }
     }

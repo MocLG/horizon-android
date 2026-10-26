@@ -1,51 +1,80 @@
 //! The game on Android (`android_main.rs` starts it after the launcher): the
-//! touch screen, the soft keyboard, the back gesture and the window that goes
-//! away while the app is in the background.
+//! touch screen, the soft keyboard, a gamepad, the gyroscope, the back
+//! gesture and the window that goes away while the app is in the background.
 //!
 //! Touch works as in Zalith Launcher 2. The control layout
 //! (`horizon_client::controls`) takes the fingers that land on its buttons
-//! and joysticks. In the world any other finger looks around, and the hotbar
-//! takes taps (select), double taps (swap hands) and long presses (drop).
-//! Over a screen a finger moves a mouse pointer the way a touchpad does: a
-//! tap clicks where it points and a long press holds the button.
+//! and joysticks, and its floating ball opens the game menu and the layout
+//! editor. In the world any other finger looks around (with gestures on, a
+//! tap uses and a hold attacks), and the hotbar takes taps (select), double
+//! taps (swap hands) and long presses (drop). Over a screen a finger moves a
+//! mouse pointer the way a touchpad does: a tap clicks where it points and a
+//! long press holds the button.
 use super::*;
 use crate::android::jni::{self, Typed};
+use horizon_client::controls::editor::{Editor, Outcome};
+use horizon_client::controls::menu::{Choice, Menu, Settings as TouchSettings};
 use horizon_client::controls::{self, Claim, Controls, Event as ControlEvent, Screen as ControlScreen};
+use horizon_client::gamepad::{Button as PadButton, PadState};
 use horizon_client::osk;
-use std::cell::RefCell;
+use horizon_client::ui_theme::{preference, set_preference};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use winit::event::{Touch as Finger, TouchPhase};
+use winit::keyboard::NativeKeyCode;
 
 /// Zalith's long press and double tap timeouts.
 const LONG_PRESS: Duration = Duration::from_millis(300);
 const DOUBLE_TAP: Duration = Duration::from_millis(300);
 /// How far a finger moves before a tap is a drag, in dp.
 const SLOP: f32 = 8.0;
+/// Mouse counts per radian the phone turns with the gyroscope on.
+const GYRO: f32 = 380.0;
 
-/// What the controls show, for `draw_touch` in the frame's HUD.
-pub(crate) struct Overlay {
-    pub controls: Controls,
-    pub screen: ControlScreen,
-    pub in_game: bool,
+/// What the HUD draws for touch, kept for `draw_touch`.
+struct Overlay {
+    controls: Controls,
+    menu: Menu,
+    editor: Option<Editor>,
+    settings: TouchSettings,
+    screen: ControlScreen,
+    in_game: bool,
     /// The menu's mouse pointer, physical pixels, while a screen is open.
-    pub pointer: Option<(f32, f32)>,
-    pub shown: bool,
+    pointer: Option<(f32, f32)>,
+    shown: bool,
 }
 
 thread_local! {
     static OVERLAY: RefCell<Option<Overlay>> = const { RefCell::new(None) };
+    /// The gamepad as the activity's events left it.
+    static GAMEPAD: Cell<PadState> = Cell::new(PadState::default());
 }
 
-/// The touch controls and the menu's pointer over the HUD.
+/// The gamepad, for the game's controller support (`game/pad.rs`).
+pub(crate) fn gamepad() -> PadState {
+    GAMEPAD.with(Cell::get)
+}
+
+/// The touch controls, the menu ball and the menu's pointer over the HUD.
 pub(crate) fn draw_touch(batch: &mut HudBatch, atlas: &horizon_client::hud::HudAtlas) {
     OVERLAY.with(|o| {
-        if let Some(o) = &mut *o.borrow_mut()
-            && o.shown
-        {
-            o.controls.draw(batch, atlas, o.in_game, o.screen, 1.0);
-            if let Some(at) = o.pointer {
-                controls::draw_pointer(batch, atlas, at, 24.0 * o.screen.density);
-            }
+        let Some(o) = &mut *o.borrow_mut() else {
+            return;
+        };
+        if !o.shown {
+            return;
+        }
+        if let Some(editor) = &mut o.editor {
+            editor.draw(batch, atlas, o.screen);
+            return;
+        }
+        if !o.settings.controls_hidden {
+            o.controls.draw(batch, atlas, o.in_game, o.screen, o.settings.opacity);
+        }
+        o.menu.draw(batch, atlas, o.screen, o.settings);
+        if let Some(at) = o.pointer {
+            controls::draw_pointer(batch, atlas, at, 24.0 * o.screen.density);
         }
     });
 }
@@ -56,10 +85,10 @@ fn with_overlay<R>(f: impl FnOnce(&mut Overlay) -> R) -> Option<R> {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Role {
-    /// A control has it.
+    /// A control, the menu or the editor has it.
     Control,
-    /// Looking around in the world; a penetrable button may hold it too.
-    Look,
+    /// Looking around in the world; `held` is the button a gesture's hold pressed.
+    Look { gestures: bool, held: Option<MouseButton> },
     /// Moving the menu's pointer; `held` once a long press pressed the button.
     Pointer { move_only: bool, held: bool },
     /// On the hotbar, over `slot`.
@@ -76,9 +105,12 @@ struct Contact {
 
 pub(crate) struct AndroidGame {
     app: App,
+    home: PathBuf,
     contacts: HashMap<u64, Contact>,
     /// Mouse buttons the controls hold down.
     buttons: Vec<MouseButton>,
+    /// Clicks a gesture tap made, released a moment later.
+    releases: Vec<(MouseButton, Instant)>,
     /// A launcher scroll event held: the direction and the next wheel step.
     scrolling: Option<(f32, Instant)>,
     /// The last tap on the hotbar, for a double tap.
@@ -95,8 +127,8 @@ pub(crate) struct AndroidGame {
 
 /// The control layout the player picked (`controlLayout` in horizon.txt,
 /// a file in `controls/`), else the default.
-fn load_controls(home: &std::path::Path) -> Controls {
-    let name = horizon_client::ui_theme::preference(home, "controlLayout").unwrap_or_default();
+fn load_controls(home: &Path) -> Controls {
+    let name = preference(home, "controlLayout").unwrap_or_default();
     if !name.is_empty() {
         let path = home.join("controls").join(format!("{name}.json"));
         match std::fs::read_to_string(&path)
@@ -108,6 +140,35 @@ fn load_controls(home: &std::path::Path) -> Controls {
         }
     }
     Controls::default_layout()
+}
+
+fn flag(home: &Path, key: &str, default: bool) -> bool {
+    preference(home, key).map_or(default, |v| v == "true")
+}
+
+fn set_flag(home: &Path, key: &str, on: bool) {
+    set_preference(home, key, Some(if on { "true" } else { "false" }));
+}
+
+/// Writes an edited layout: over the file it came from, or to a new one when
+/// it was the default. Returns the file's name.
+fn save_layout(home: &Path, layout: &controls::layout::Layout) -> std::io::Result<String> {
+    let dir = home.join("controls");
+    std::fs::create_dir_all(&dir)?;
+    let mut stem = preference(home, "controlLayout").unwrap_or_default();
+    if stem.is_empty() {
+        stem = (1..)
+            .map(|n| format!("custom-{n}"))
+            .find(|s| !dir.join(format!("{s}.json")).exists())
+            .unwrap_or_default();
+    }
+    let mut layout = layout.clone();
+    if layout.info.name.default == "Default" && stem.starts_with("custom-") {
+        layout.info.name.default = format!("My layout {}", stem.trim_start_matches("custom-"));
+    }
+    std::fs::write(dir.join(format!("{stem}.json")), layout.to_json())?;
+    set_preference(home, "controlLayout", Some(&stem));
+    Ok(stem)
 }
 
 impl AndroidGame {
@@ -122,17 +183,36 @@ impl AndroidGame {
         let home = std::env::current_dir()?;
         let settings = Settings::load(&home.join("options.txt"));
         Behaviours::set_cache_dir(home.join(".horizon-cache"));
-        let enabled = horizon_client::ui_theme::preference(&home, "touchControls")
-            .is_none_or(|v| v != "false");
+        let enabled = flag(&home, "touchControls", true);
         let dp = jni::platform("density", "")
             .and_then(|d| d.parse().ok())
             .unwrap_or(2.0);
         let dark = jni::platform("dark", "").as_deref() == Some("1");
         let mut controls = load_controls(&home);
         controls.language = jni::platform("language", "").unwrap_or_default();
+        let touch = TouchSettings {
+            gestures: flag(&home, "touchGestures", false),
+            gyroscope: flag(&home, "touchGyroscope", false),
+            opacity: preference(&home, "touchOpacity")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0),
+            controls_hidden: false,
+        };
+        let ball = preference(&home, "touchMenuBall")
+            .and_then(|v| {
+                let (x, y) = v.split_once(',')?;
+                Some((x.parse().ok()?, y.parse().ok()?))
+            })
+            .unwrap_or((0.5, 0.05));
+        if touch.gyroscope {
+            jni::gyroscope(true);
+        }
         OVERLAY.with(|o| {
             *o.borrow_mut() = Some(Overlay {
                 controls,
+                menu: Menu::new(ball),
+                editor: None,
+                settings: touch,
                 screen: ControlScreen {
                     width: 1.0,
                     height: 1.0,
@@ -146,8 +226,10 @@ impl AndroidGame {
         });
         Ok(Self {
             app: loading_app(options, settings, vanilla_root, None, started)?,
+            home,
             contacts: HashMap::new(),
             buttons: Vec::new(),
+            releases: Vec::new(),
             scrolling: None,
             last_slot_tap: None,
             keyboard: false,
@@ -210,6 +292,10 @@ impl AndroidGame {
         }
     }
 
+    fn editing(&self) -> bool {
+        with_overlay(|o| o.editor.is_some()).unwrap_or(false)
+    }
+
     pub(crate) fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window().is_none() {
             self.app.resumed(event_loop);
@@ -228,6 +314,9 @@ impl AndroidGame {
         if let App::Ready(game) = &mut self.app {
             game.audio.set_output(true);
         }
+        if with_overlay(|o| o.settings.gyroscope).unwrap_or(false) {
+            jni::gyroscope(true);
+        }
         if let Some(w) = self.window() {
             w.request_redraw();
         }
@@ -236,6 +325,7 @@ impl AndroidGame {
     /// The app left the screen and its window with it.
     pub(crate) fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         jni::show_keyboard(false);
+        jni::gyroscope(false);
         self.keyboard = false;
         self.forced_keyboard = false;
         if let Some(renderer) = self.renderer() {
@@ -243,8 +333,10 @@ impl AndroidGame {
             renderer.suspended = true;
         }
         self.contacts.clear();
+        GAMEPAD.with(|g| g.set(PadState::default()));
         with_overlay(|o| o.controls.release_all());
         self.apply_control_events(event_loop);
+        self.release_mouse_buttons();
         if let App::Ready(game) = &mut self.app {
             game.audio.set_output(false);
         }
@@ -252,7 +344,10 @@ impl AndroidGame {
 
     pub(crate) fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::Touch(finger) => self.touch(event_loop, id, finger),
+            WindowEvent::Touch(finger) => {
+                with_overlay(|o| o.controls.gamepad = false);
+                self.touch(event_loop, id, finger);
+            }
             WindowEvent::KeyboardInput { event: key, .. }
                 if key.physical_key == PhysicalKey::Code(KeyCode::BrowserBack) =>
             {
@@ -260,20 +355,91 @@ impl AndroidGame {
                     self.back();
                 }
             }
+            WindowEvent::KeyboardInput { event: key, .. }
+                if matches!(key.physical_key, PhysicalKey::Unidentified(NativeKeyCode::Android(_))) =>
+            {
+                if let PhysicalKey::Unidentified(NativeKeyCode::Android(code)) = key.physical_key
+                    && let Some(button) = pad_button(code)
+                {
+                    let down = key.state == ElementState::Pressed;
+                    GAMEPAD.with(|g| {
+                        let mut state = g.get();
+                        state.set(button, down);
+                        if button == PadButton::LeftTrigger {
+                            state.triggers[0] = if down { 1.0 } else { 0.0 };
+                        }
+                        if button == PadButton::RightTrigger {
+                            state.triggers[1] = if down { 1.0 } else { 0.0 };
+                        }
+                        g.set(state);
+                    });
+                    with_overlay(|o| o.controls.gamepad = true);
+                }
+            }
             event => self.app.window_event(event_loop, id, event),
         }
     }
 
     pub(crate) fn device_event(&mut self, event_loop: &ActiveEventLoop, id: DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::Motion { axis, value } = event {
+            // Android's axis numbers (MotionEvent.AXIS_*); sticks point up as minus.
+            let v = value as f32;
+            GAMEPAD.with(|g| {
+                let mut s = g.get();
+                match axis {
+                    0 => s.left[0] = v,
+                    1 => s.left[1] = -v,
+                    11 => s.right[0] = v,
+                    14 => s.right[1] = -v,
+                    17 | 23 => s.triggers[0] = v.max(0.0),
+                    18 | 22 => s.triggers[1] = v.max(0.0),
+                    15 => {
+                        s.set(PadButton::DPadLeft, v < -0.5);
+                        s.set(PadButton::DPadRight, v > 0.5);
+                    }
+                    16 => {
+                        s.set(PadButton::DPadUp, v < -0.5);
+                        s.set(PadButton::DPadDown, v > 0.5);
+                    }
+                    _ => {}
+                }
+                g.set(s);
+            });
+            if v.abs() > 0.3 {
+                with_overlay(|o| o.controls.gamepad = true);
+            }
+            return;
+        }
         self.app.device_event(event_loop, id, event);
     }
 
     pub(crate) fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        jni::gyroscope(false);
         self.app.exiting(event_loop);
     }
 
-    /// The back gesture: what Escape does.
+    /// The back gesture: it leaves the editor or the menu, else does what Escape does.
     pub(crate) fn back(&mut self) {
+        let closed = with_overlay(|o| {
+            if let Some(editor) = &mut o.editor {
+                if !editor.finish_typing() {
+                    o.editor = None;
+                    o.controls = load_controls_into(&o.controls);
+                }
+                true
+            } else if o.menu.open {
+                o.menu.open = false;
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+        if closed {
+            jni::show_keyboard(false);
+            self.keyboard = false;
+            return;
+        }
         if let App::Ready(game) = &mut self.app
             && let Err(e) = game.pad_back()
         {
@@ -284,7 +450,7 @@ impl AndroidGame {
     pub(crate) fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let screen = self.screen();
-        let in_game = self.in_game();
+        let in_game = self.in_game() && !self.editing();
         if in_game != self.was_in_game {
             self.was_in_game = in_game;
             if !in_game {
@@ -292,19 +458,34 @@ impl AndroidGame {
             }
         }
         let enabled = self.enabled;
-        with_overlay(|o| {
+        let gyroscope = with_overlay(|o| {
             o.screen = screen;
             o.in_game = in_game;
             o.shown = enabled;
-            if in_game {
+            if in_game || o.editor.is_some() {
                 o.pointer = None;
             } else if o.pointer.is_none() {
                 // A screen opens with the pointer in the middle, as Zalith's does.
                 o.pointer = Some((screen.width / 2.0, screen.height / 2.0));
             }
-        });
+            o.settings.gyroscope
+        })
+        .unwrap_or(false);
+        let (gx, gy) = jni::take_gyro();
+        if gyroscope
+            && in_game
+            && let App::Ready(game) = &mut self.app
+        {
+            game.mouse
+                .on_move(0.0, 0.0, f64::from(gx * GYRO), f64::from(-gy * GYRO), true, true);
+        }
         self.typed();
         self.timers(event_loop, now);
+        for (button, _) in self.releases.extract_if(.., |(_, at)| now >= *at) {
+            if let App::Ready(game) = &mut self.app {
+                let _ = game.play_mouse(button, false);
+            }
+        }
         self.apply_control_events(event_loop);
         if let Some((lines, next)) = self.scrolling
             && now >= next
@@ -312,10 +493,12 @@ impl AndroidGame {
             self.wheel(event_loop, lines);
             self.scrolling = Some((lines, now + Duration::from_millis(80)));
         }
+        let editing = self.editing();
         if let App::Ready(game) = &mut self.app {
-            let typing = game.pad_typing()
-                || game.title.as_mut().is_some_and(|t| t.focused_field().is_some());
-            let want = typing || self.forced_keyboard;
+            let typing = !editing
+                && (game.pad_typing()
+                    || game.title.as_mut().is_some_and(|t| t.focused_field().is_some()));
+            let want = typing || self.forced_keyboard || (editing && self.keyboard);
             if want != self.keyboard {
                 self.keyboard = want;
                 jni::show_keyboard(want);
@@ -326,6 +509,26 @@ impl AndroidGame {
 
     fn typed(&mut self) {
         let typed = jni::take_typed();
+        if self.editing() {
+            for t in typed {
+                let done = with_overlay(|o| {
+                    let editor = o.editor.as_mut()?;
+                    match &t {
+                        Typed::Text(text) => editor.type_text(text),
+                        Typed::Backspace => editor.backspace(),
+                        Typed::Enter | Typed::Back => return Some(editor.finish_typing()),
+                    }
+                    None
+                })
+                .flatten();
+                if done.is_some() {
+                    self.keyboard = false;
+                    jni::show_keyboard(false);
+                }
+            }
+            return;
+        }
+        let back = typed.contains(&Typed::Back);
         let App::Ready(game) = &mut self.app else {
             return;
         };
@@ -334,19 +537,19 @@ impl AndroidGame {
                 Typed::Text(text) => game.pad_osk_output(osk::Output::Text(text)),
                 Typed::Backspace => game.pad_osk_output(osk::Output::Backspace),
                 Typed::Enter => game.pad_osk_output(osk::Output::Enter),
-                Typed::Back => {
-                    if let Err(e) = game.pad_back() {
-                        log::warn!("Horizon: back: {e}");
-                    }
-                }
+                Typed::Back => {}
             }
+        }
+        if back {
+            self.back();
         }
     }
 
-    /// Long presses: the menu pointer's button and the hotbar's drop.
+    /// Long presses: the menu pointer's button, the hotbar's drop and a gesture's hold.
     fn timers(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
         let mut hold = false;
         let mut drop = false;
+        let mut gesture = false;
         for contact in self.contacts.values_mut() {
             if contact.moved || now - contact.since < LONG_PRESS {
                 continue;
@@ -363,6 +566,13 @@ impl AndroidGame {
                     *dropped = true;
                     drop = true;
                 }
+                Role::Look {
+                    gestures: true,
+                    held,
+                } if held.is_none() => {
+                    *held = Some(MouseButton::Left);
+                    gesture = true;
+                }
                 _ => {}
             }
         }
@@ -372,9 +582,14 @@ impl AndroidGame {
         if hold {
             self.menu_mouse(event_loop, id, MouseButton::Left, true);
         }
-        if drop && let App::Ready(game) = &mut self.app {
-            tap_key(game, KeyCode::KeyQ);
-            jni::vibrate(15);
+        if let App::Ready(game) = &mut self.app {
+            if drop {
+                tap_key(game, KeyCode::KeyQ);
+                jni::vibrate(15);
+            }
+            if gesture {
+                let _ = game.play_mouse(MouseButton::Left, true);
+            }
         }
     }
 
@@ -506,7 +721,9 @@ impl AndroidGame {
                     }
                     "launcher.event.scroll_up.single" if pressed => self.wheel(event_loop, 1.0),
                     "launcher.event.scroll_down.single" if pressed => self.wheel(event_loop, -1.0),
-                    "launcher.event.switch_menu" if pressed => self.back(),
+                    "launcher.event.switch_menu" if pressed => {
+                        with_overlay(|o| o.menu.open = !o.menu.open);
+                    }
                     _ => {}
                 },
                 ControlEvent::SendText(text) => {
@@ -522,22 +739,109 @@ impl AndroidGame {
         }
     }
 
+    /// A choice from the game menu.
+    fn choose(&mut self, choice: Choice) {
+        let home = self.home.clone();
+        match choice {
+            Choice::EditControls => {
+                if self.in_game()
+                    && let App::Ready(game) = &mut self.app
+                {
+                    // The world pauses behind the editor.
+                    let _ = game.pad_back();
+                }
+                self.release_mouse_buttons();
+                with_overlay(|o| {
+                    o.menu.open = false;
+                    let controls = std::mem::replace(&mut o.controls, Controls::default_layout());
+                    o.editor = Some(Editor::new(controls));
+                });
+            }
+            Choice::Gestures => {
+                let on = with_overlay(|o| {
+                    o.settings.gestures = !o.settings.gestures;
+                    o.settings.gestures
+                })
+                .unwrap_or(false);
+                set_flag(&home, "touchGestures", on);
+            }
+            Choice::Gyroscope => {
+                let on = with_overlay(|o| {
+                    o.settings.gyroscope = !o.settings.gyroscope;
+                    o.settings.gyroscope
+                })
+                .unwrap_or(false);
+                set_flag(&home, "touchGyroscope", on);
+                jni::gyroscope(on);
+            }
+            Choice::Opacity => {
+                let opacity = with_overlay(|o| {
+                    o.settings.opacity = match o.settings.opacity {
+                        v if v > 0.8 => 0.75,
+                        v if v > 0.6 => 0.5,
+                        v if v > 0.3 => 0.25,
+                        _ => 1.0,
+                    };
+                    o.settings.opacity
+                })
+                .unwrap_or(1.0);
+                set_preference(&home, "touchOpacity", Some(&opacity.to_string()));
+            }
+            Choice::HideControls => {
+                with_overlay(|o| {
+                    o.settings.controls_hidden = !o.settings.controls_hidden;
+                    o.controls.release_all();
+                });
+            }
+            Choice::Keyboard => {
+                self.forced_keyboard = !self.forced_keyboard;
+                with_overlay(|o| o.menu.open = false);
+            }
+            Choice::Pause => {
+                with_overlay(|o| o.menu.open = false);
+                if let App::Ready(game) = &mut self.app {
+                    let _ = game.pad_back();
+                }
+            }
+            Choice::Close => {
+                with_overlay(|o| o.menu.open = false);
+            }
+        }
+    }
+
     fn touch(&mut self, event_loop: &ActiveEventLoop, id: WindowId, finger: Finger) {
         let at = (finger.location.x as f32, finger.location.y as f32);
         let now = Instant::now();
         let screen = self.screen();
+        if self.enabled && self.editing() {
+            self.edit_touch(finger.id, finger.phase, at, screen);
+            return;
+        }
         let in_game = self.in_game();
         let slop = SLOP * self.dp;
         match finger.phase {
             TouchPhase::Started => {
-                let claim = if self.enabled {
-                    with_overlay(|o| o.controls.down(finger.id, at, in_game, screen)).unwrap_or(Claim::None)
-                } else {
-                    Claim::None
-                };
+                let enabled = self.enabled;
+                let claim = with_overlay(|o| {
+                    if !enabled {
+                        return Claim::None;
+                    }
+                    if o.menu.down(finger.id, at, screen) {
+                        return Claim::Taken;
+                    }
+                    if o.settings.controls_hidden {
+                        return Claim::None;
+                    }
+                    o.controls.down(finger.id, at, in_game, screen)
+                })
+                .unwrap_or(Claim::None);
+                let gestures = with_overlay(|o| o.settings.gestures).unwrap_or(false);
                 let role = match claim {
                     Claim::Taken => Role::Control,
-                    Claim::MoveOnly if in_game => Role::Look,
+                    Claim::MoveOnly if in_game => Role::Look {
+                        gestures: false,
+                        held: None,
+                    },
                     Claim::MoveOnly => Role::Pointer {
                         move_only: true,
                         held: false,
@@ -550,7 +854,7 @@ impl AndroidGame {
                                 dropped: false,
                             }
                         }
-                        _ if in_game => Role::Look,
+                        _ if in_game => Role::Look { gestures, held: None },
                         _ => Role::Pointer {
                             move_only: false,
                             held: false,
@@ -570,7 +874,13 @@ impl AndroidGame {
             }
             TouchPhase::Moved => {
                 if self.enabled {
-                    with_overlay(|o| o.controls.moved(finger.id, at, in_game, screen));
+                    with_overlay(|o| {
+                        if o.menu.holds(finger.id) {
+                            o.menu.moved(finger.id, at, screen);
+                        } else {
+                            o.controls.moved(finger.id, at, in_game, screen);
+                        }
+                    });
                 }
                 let hotbar = self.hotbar_slot(at);
                 let Some(contact) = self.contacts.get_mut(&finger.id) else {
@@ -583,7 +893,7 @@ impl AndroidGame {
                 }
                 let delta = (at.0 - last.0, at.1 - last.1);
                 match &mut contact.role {
-                    Role::Look => {
+                    Role::Look { .. } => {
                         if let App::Ready(game) = &mut self.app {
                             game.mouse
                                 .on_move(0.0, 0.0, f64::from(delta.0), f64::from(delta.1), true, true);
@@ -600,13 +910,25 @@ impl AndroidGame {
                 }
             }
             TouchPhase::Ended | TouchPhase::Cancelled => {
+                let mut choice = None;
                 if self.enabled {
-                    with_overlay(|o| o.controls.up(finger.id, screen));
+                    choice = with_overlay(|o| {
+                        let choice = o.menu.up(finger.id, at);
+                        o.controls.up(finger.id, screen);
+                        choice
+                    })
+                    .flatten();
+                    let ball = with_overlay(|o| o.menu.ball).unwrap_or((0.5, 0.05));
+                    set_preference(&self.home, "touchMenuBall", Some(&format!("{},{}", ball.0, ball.1)));
                 }
                 let Some(contact) = self.contacts.remove(&finger.id) else {
                     return;
                 };
+                if let Some(choice) = choice {
+                    self.choose(choice);
+                }
                 let cancelled = finger.phase == TouchPhase::Cancelled;
+                let quick = !contact.moved && !cancelled && now - contact.since <= LONG_PRESS;
                 match contact.role {
                     Role::Pointer {
                         move_only: false,
@@ -614,9 +936,20 @@ impl AndroidGame {
                     } => {
                         if held {
                             self.menu_mouse(event_loop, id, MouseButton::Left, false);
-                        } else if !contact.moved && !cancelled && now - contact.since <= LONG_PRESS {
+                        } else if quick {
                             self.menu_mouse(event_loop, id, MouseButton::Left, true);
                             self.menu_mouse(event_loop, id, MouseButton::Left, false);
+                        }
+                    }
+                    Role::Look { gestures, held } => {
+                        if let App::Ready(game) = &mut self.app {
+                            if let Some(button) = held {
+                                let _ = game.play_mouse(button, false);
+                            } else if gestures && quick {
+                                // Zalith's gesture tap: the right button.
+                                let _ = game.play_mouse(MouseButton::Right, true);
+                                self.releases.push((MouseButton::Right, now + Duration::from_millis(60)));
+                            }
                         }
                     }
                     Role::Hotbar { slot, dropped } if !dropped && !cancelled => {
@@ -634,6 +967,62 @@ impl AndroidGame {
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+
+    /// A finger on the layout editor.
+    fn edit_touch(&mut self, finger: u64, phase: TouchPhase, at: (f32, f32), screen: ControlScreen) {
+        let outcome = with_overlay(|o| {
+            let editor = o.editor.as_mut()?;
+            Some(match phase {
+                TouchPhase::Started => {
+                    editor.down(finger, at, screen);
+                    Outcome::None
+                }
+                TouchPhase::Moved => {
+                    editor.moved(finger, at, screen);
+                    Outcome::None
+                }
+                TouchPhase::Ended | TouchPhase::Cancelled => editor.up(finger, at, screen),
+            })
+        })
+        .flatten()
+        .unwrap_or(Outcome::None);
+        match outcome {
+            Outcome::None => {}
+            Outcome::Keyboard(show) => {
+                self.keyboard = show;
+                jni::show_keyboard(show);
+            }
+            Outcome::Save => {
+                let home = self.home.clone();
+                let saved = with_overlay(|o| {
+                    let editor = o.editor.take()?;
+                    let result = save_layout(&home, editor.layout());
+                    o.controls = editor.into_controls();
+                    Some(result)
+                })
+                .flatten();
+                match saved {
+                    Some(Ok(stem)) => log::info!("Horizon: saved the control layout {stem}"),
+                    Some(Err(e)) => log::warn!("Horizon: the control layout was not saved: {e}"),
+                    None => {}
+                }
+                self.keyboard = false;
+                jni::show_keyboard(false);
+            }
+            Outcome::Exit => {
+                let home = self.home.clone();
+                with_overlay(|o| {
+                    if let Some(editor) = o.editor.take() {
+                        let language = editor.into_controls().language;
+                        o.controls = load_controls(&home);
+                        o.controls.language = language;
+                    }
+                });
+                self.keyboard = false;
+                jni::show_keyboard(false);
             }
         }
     }
@@ -658,9 +1047,36 @@ impl AndroidGame {
     }
 }
 
+/// The controls as they were before an editing that was left unsaved.
+fn load_controls_into(current: &Controls) -> Controls {
+    let home = std::env::current_dir().unwrap_or_default();
+    let mut controls = load_controls(&home);
+    controls.language = current.language.clone();
+    controls
+}
+
 fn tap_key(game: &mut Game, key: KeyCode) {
     let _ = game.mapped_key(key, true, false);
     let _ = game.mapped_key(key, false, false);
+}
+
+/// Android's gamepad key codes (KeyEvent.KEYCODE_BUTTON_*) as the pad's buttons.
+fn pad_button(code: u32) -> Option<PadButton> {
+    Some(match code {
+        96 => PadButton::South,
+        97 => PadButton::East,
+        99 => PadButton::West,
+        100 => PadButton::North,
+        102 => PadButton::LeftBumper,
+        103 => PadButton::RightBumper,
+        104 => PadButton::LeftTrigger,
+        105 => PadButton::RightTrigger,
+        106 => PadButton::LeftStick,
+        107 => PadButton::RightStick,
+        108 => PadButton::Start,
+        109 | 110 => PadButton::Select,
+        _ => return None,
+    })
 }
 
 fn mouse_button(name: &str) -> Option<MouseButton> {
@@ -793,5 +1209,6 @@ mod tests {
         assert_eq!(glfw_key("GLFW_KEY_LEFT_CONTROL"), Some(KeyCode::ControlLeft));
         assert_eq!(glfw_key("GLFW_KEY_UNKNOWN"), None);
         assert_eq!(mouse_button("GLFW_MOUSE_BUTTON_RIGHT"), Some(MouseButton::Right));
+        assert_eq!(pad_button(96), Some(PadButton::South));
     }
 }
