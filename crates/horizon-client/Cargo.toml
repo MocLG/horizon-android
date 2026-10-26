@@ -77,6 +77,21 @@ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+# The NativeActivity behind the Android app (`src/android_main.rs`).
+winit = { version = "0.30.13", features = ["android-native-activity"] }
+# The activity's Java side: the keyboard, links, the clipboard. The version
+# android-activity carries, so its `JavaVM` needs no conversion.
+jni = "0.22.4"
+ndk-context = "0.1.1"
+libc = "0.2"
+# The launcher's own code for accounts and Mojang's files (launcher/src), which the
+# Android app shares, and the preparation it runs on the phone.
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+getrandom = "0.3"
+dirs = "5"
+horizon-prepare = { path = "../horizon-prepare" }
+
 [target.'cfg(windows)'.build-dependencies]
 # The icon resource in the .exe (build.rs).
 winresource = "0.1"
@@ -91,6 +106,8 @@ controllers = ["dep:gilrs", "dep:horizon-dualsense"]
 # Runs code mods (wasmtime and cranelift: a quarter of a clean build). On in every release build
 # (release.yml); the tests and probes don't need it. Content mods load without it.
 mods = ["horizon-mods/runtime"]
+# The Android app's library (`src/android_main.rs`, built by android/build.sh).
+android = []
 # Records the call sites of mob random draws (`mob_ai_probe` traces).
 rng-trace = ["horizon-core/rng-trace"]
 
@@ -98,6 +115,13 @@ rng-trace = ["horizon-core/rng-trace"]
 [[example]]
 name = "client_probe"
 path = "examples/probe/main.rs"
+
+# The Android app: the game and the launcher in one library the activity loads.
+[[example]]
+name = "horizon"
+path = "src/android_main.rs"
+crate-type = ["cdylib"]
+required-features = ["android"]
 
 [lints]
 workspace = true

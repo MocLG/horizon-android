@@ -165,7 +165,7 @@ pub(super) fn owner_at(position: [f64; 3], yaw: f32, entity_type: &str) -> Owner
     }
 }
 /// `UseDuration` of a stack: 72000 for drawn items, the consume time for food.
-fn use_duration(components: &Components) -> i32 {
+pub(super) fn use_duration(components: &Components) -> i32 {
     if let Some(c) = components.get("minecraft:consumable") {
         let seconds = c["consume_seconds"].as_f64().unwrap_or(1.6);
         return (seconds * 20.0) as i32;

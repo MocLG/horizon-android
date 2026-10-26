@@ -3,6 +3,8 @@
 mod advancements;
 mod advancements_screen;
 mod agent;
+#[cfg(target_os = "android")]
+pub(crate) mod android;
 mod agent_settings;
 mod allays;
 mod armor_stands;
@@ -316,6 +318,10 @@ impl Options {
         })
     }
     fn read() -> Result<Option<Self>> {
+        Self::from_args(std::env::args().skip(1))
+    }
+    /// The options from the game's arguments (`read`'s, or the Android launcher's).
+    fn from_args(mut args: impl Iterator<Item = String>) -> Result<Option<Self>> {
         let sibling = std::env::current_exe()?
             .parent()
             .ok_or("missing executable directory")?
@@ -359,7 +365,6 @@ impl Options {
             execution_role: execution_role::ExecutionRole::Client,
         };
         let mut session_file = std::env::var("HORIZON_SESSION_FILE").ok();
-        let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--help" | "-h" => {
@@ -4778,7 +4783,9 @@ impl Game<'_> {
             self.captured = window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
-                .is_ok();
+                .is_ok()
+                // A touch screen has no pointer to grab: the look is always the game's.
+                || cfg!(target_os = "android");
             #[cfg(not(target_os = "macos"))]
             if self.captured && self.focused {
                 warp(window);
@@ -4971,6 +4978,8 @@ impl Game<'_> {
         self.frame_graph
             .draw(self.settings.horizon.overlay, &mut batch, &self.gui.atlas);
         self.draw_pad_cursor(&mut batch);
+        #[cfg(target_os = "android")]
+        android::draw_touch(&mut batch, &self.gui.atlas);
         batch
     }
     fn hud_layers(&mut self, size: [u32; 2]) -> HudBatch {
@@ -13606,6 +13615,33 @@ fn run_loading(
     pack_error: Option<String>,
     started: Instant,
 ) -> Result<()> {
+    let mut app = loading_app(options, settings, vanilla_root, pack_error, started)?;
+    EventLoop::new()?.run_app(&mut app)?;
+    horizon_client::discord_presence::stop();
+    match app {
+        App::Ready(mut game) => {
+            write_report(&game)?;
+            if let Some(e) = game.error.take() {
+                return Err(e);
+            }
+        }
+        App::Loading(loading) => {
+            if let Some(e) = loading.error {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The loading screen, with the resources loading on a worker.
+fn loading_app(
+    options: Options,
+    settings: Settings,
+    vanilla_root: PathBuf,
+    pack_error: Option<String>,
+    started: Instant,
+) -> Result<App> {
     let progress = Progress::new();
     let (receiver, loader) =
         startup_menu::spawn_loader(&options, &settings, &vanilla_root, started, &progress)?;
@@ -13629,23 +13665,7 @@ fn run_loading(
         menu,
         error: None,
     };
-    let mut app = App::Loading(Box::new(loading));
-    EventLoop::new()?.run_app(&mut app)?;
-    horizon_client::discord_presence::stop();
-    match app {
-        App::Ready(mut game) => {
-            write_report(&game)?;
-            if let Some(e) = game.error.take() {
-                return Err(e);
-            }
-        }
-        App::Loading(loading) => {
-            if let Some(e) = loading.error {
-                return Err(e);
-            }
-        }
-    }
-    Ok(())
+    Ok(App::Loading(Box::new(loading)))
 }
 
 pub fn run() -> Result<()> {
