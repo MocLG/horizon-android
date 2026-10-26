@@ -1,0 +1,70 @@
+plugins {
+    id 'com.android.application'
+}
+
+// android/build.sh fills these: the native libraries (the game, the java
+// launcher, libc++) and the assets (the Java runtime, the exporters).
+def staged = rootProject.file('build/stage')
+
+android {
+    namespace 'com.lukagejak.horizon'
+    compileSdk 37
+
+    defaultConfig {
+        applicationId 'com.lukagejak.horizon'
+        minSdk 29
+        targetSdk 37
+        versionCode Integer.parseInt(project.findProperty('horizonVersionCode') ?: '1')
+        versionName project.findProperty('horizonVersionName') ?: '0.1.0'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ["$staged/jniLibs"]
+            assets.srcDirs = ["$staged/assets"]
+        }
+    }
+
+    signingConfigs {
+        release {
+            def keystore = System.getenv('HORIZON_ANDROID_KEYSTORE')
+            if (keystore) {
+                storeFile file(keystore)
+                storePassword System.getenv('HORIZON_ANDROID_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('HORIZON_ANDROID_KEY_ALIAS') ?: 'horizon'
+                keyPassword System.getenv('HORIZON_ANDROID_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig System.getenv('HORIZON_ANDROID_KEYSTORE') ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Extracted to the native library folder: the java launcher must be
+            // a real file there to start.
+            useLegacyPackaging = true
+            // Already stripped by build.sh; the NDK's strip is an x86_64 binary.
+            keepDebugSymbols += '**/*.so'
+        }
+    }
+
+    androidResources {
+        // The runtime and the exporters are zips already.
+        noCompress += ['zip']
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

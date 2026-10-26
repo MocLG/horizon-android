@@ -1,0 +1,18 @@
+[package]
+name = "horizon-java-launcher"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "The `java` command of the Android app: starts the bundled runtime's launcher (JLI_Launch)"
+
+# Packaged as lib/arm64-v8a/libhorizonjava.so: Android lets an app start programs
+# only from its native library folder, never from its data, where the runtime is.
+[[bin]]
+name = "horizon-java-launcher"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+strip = true
