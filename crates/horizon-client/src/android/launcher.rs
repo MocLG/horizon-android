@@ -46,8 +46,21 @@ pub struct Launcher {
     started: Instant,
     /// The game's last crash, from its crash-reports folder.
     crash: Option<String>,
+    /// The display cutout's margins in pixels, asked again when the window changes.
+    insets: Option<[f32; 4]>,
     /// Set by Play: the arguments the game starts with.
     pub play: Option<Vec<String>>,
+}
+
+/// The display cutout's margins in pixels: left, top, right, bottom.
+fn insets() -> [f32; 4] {
+    let mut insets = [0.0; 4];
+    if let Some(text) = jni::platform("insets", "") {
+        for (inset, value) in insets.iter_mut().zip(text.split(',')) {
+            *inset = value.parse().unwrap_or(0.0);
+        }
+    }
+    insets
 }
 
 impl Launcher {
@@ -71,6 +84,7 @@ impl Launcher {
             touch,
             started: Instant::now(),
             crash,
+            insets: None,
             play: None,
         };
         // The app's own files first, so the version folder is there to read.
@@ -131,6 +145,7 @@ impl Launcher {
         let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
         match event {
             WindowEvent::Resized(size) => {
+                self.insets = None;
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height, scale);
                 }
@@ -249,14 +264,11 @@ impl Launcher {
         let Some(mut renderer) = self.renderer.take() else {
             return;
         };
-        let insets = jni::platform("insets", "")
-            .map(|s| {
-                s.split(',')
-                    .map(|v| v.parse::<f32>().unwrap_or(0.0))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let inset = |i: usize| insets.get(i).copied().unwrap_or(0.0) / renderer.scale;
+        if self.insets.is_none() {
+            self.insets = Some(insets());
+        }
+        let insets = self.insets.unwrap_or_default();
+        let inset = |i: usize| insets[i] / renderer.scale;
         let margins = (inset(0).max(GUTTER), inset(2).max(GUTTER));
         let pointer = std::mem::take(&mut self.pointer.tap);
         let scroll = std::mem::take(&mut self.pointer.scroll);
@@ -589,13 +601,17 @@ impl Launcher {
             self.touch = on;
             set_preference(&self.paths.home, "touchControls", if on { "true" } else { "false" });
         }
-        // The game's files.
+        // Where a Minecraft folder can be copied to.
         let (row, i) = next(&mut y);
         ui.row(
             row,
             i,
-            "Game folder",
-            &format!("Worlds, screenshots and resource packs: {}", self.paths.home.display()),
+            "Minecraft folder",
+            &format!(
+                "To play without signing in, copy a Minecraft folder with {} to {} over USB.",
+                horizon_core::VANILLA_VERSION,
+                self.paths.copied_minecraft().display()
+            ),
             0.0,
         );
         // Preparing again.

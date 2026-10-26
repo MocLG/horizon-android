@@ -19,9 +19,12 @@ pub struct Paths {
     pub root: PathBuf,
     /// The Java runtime, unpacked from the app.
     pub jre: PathBuf,
-    /// The game's folder: worlds, options, logs. In the app's external
-    /// storage, so a file manager reaches the worlds.
+    /// The game's folder: worlds, options, logs. In the app's internal
+    /// storage: the external one may not hold the worlds' session locks.
     pub home: PathBuf,
+    /// Where a player can copy a Minecraft folder over USB: the app's
+    /// external storage.
+    pub shared: PathBuf,
     /// The app's native libraries, where the java launcher is.
     pub libs: PathBuf,
     pub cache: PathBuf,
@@ -32,10 +35,10 @@ impl Paths {
         let internal = app
             .internal_data_path()
             .unwrap_or_else(|| PathBuf::from("/data/local/tmp/horizon"));
-        let home = app
+        let shared = app
             .external_data_path()
             .filter(|p| fs::create_dir_all(p).is_ok())
-            .unwrap_or_else(|| internal.join("game"));
+            .unwrap_or_else(|| internal.join("shared"));
         let libs = super::jni::platform("native_lib_dir", "")
             .map(PathBuf::from)
             .unwrap_or_default();
@@ -43,7 +46,8 @@ impl Paths {
             data: internal.join("launcher"),
             root: internal.join("horizon"),
             jre: internal.join("runtimes").join("jre-25"),
-            home,
+            home: internal.join("game"),
+            shared,
             libs,
             cache: internal.join("cache"),
         }
@@ -64,7 +68,7 @@ impl Paths {
     }
     /// The Minecraft folder a player copied into the game's folder, if any.
     pub fn copied_minecraft(&self) -> PathBuf {
-        self.home.join("minecraft")
+        self.shared.join("minecraft")
     }
     pub fn downloaded_minecraft(&self) -> PathBuf {
         self.data.join("minecraft")

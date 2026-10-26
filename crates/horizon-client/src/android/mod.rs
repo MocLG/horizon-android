@@ -43,6 +43,11 @@ pub fn main(app: AndroidApp) {
     // SAFETY: as above.
     unsafe { std::env::set_var("HORIZON_HOME", &paths.home) };
     let _ = std::env::set_current_dir(&paths.home);
+    // A phone's first start: a nearer horizon than a desktop's default 12 chunks.
+    let options = paths.home.join("options.txt");
+    if !options.exists() {
+        let _ = std::fs::write(options, "renderDistance:8\nsimulationDistance:6\n");
+    }
     horizon_client::telemetry::mark_start();
     horizon_client::logging::init(&paths.home, "Render thread");
     horizon_client::crash::install(paths.home.clone(), "client");
