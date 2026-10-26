@@ -139,6 +139,9 @@ impl AndroidGame {
                 renderer.resize(size.width, size.height);
             }
         }
+        if let App::Ready(game) = &mut self.app {
+            game.audio.set_output(true);
+        }
         if let Some(w) = self.window() {
             w.request_redraw();
         }
@@ -155,6 +158,7 @@ impl AndroidGame {
         if let App::Ready(game) = &mut self.app {
             self.contacts.clear();
             release_play(game, &mut self.stick_keys);
+            game.audio.set_output(false);
         }
     }
 

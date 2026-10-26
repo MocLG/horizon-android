@@ -691,6 +691,23 @@ impl Audio {
     pub fn resume(&mut self) {
         self.engine.resume(&mut self.backend);
     }
+    /// Stops or restarts the output while the game is off screen (an Android
+    /// app in the background): the sounds keep their place.
+    pub fn set_output(&mut self, on: bool) {
+        #[cfg(feature = "audio")]
+        if let Some(stream) = &self._stream {
+            let result = if on {
+                stream.play().map_err(|e| e.to_string())
+            } else {
+                stream.pause().map_err(|e| e.to_string())
+            };
+            if let Err(e) = result {
+                log::warn!("Horizon audio: {e}");
+            }
+        }
+        #[cfg(not(feature = "audio"))]
+        let _ = on;
+    }
     /// `SoundManager.stop()`: every sound.
     pub fn stop_all(&mut self) {
         self.engine.stop_all(&mut self.backend);
