@@ -1,0 +1,7 @@
+#!/bin/sh
+# Host shim: this build machine is aarch64 but the Android SDK's aapt2 is an
+# x86_64 binary, so run it through qemu-user. Only needed on this kind of host;
+# pass it to Gradle with -Pandroid.aapt2FromMavenOverride="$PWD/tools/aapt2".
+: "${ANDROID_HOME:=${ANDROID_SDK_ROOT:-$HOME/android-sdk}}"
+AAPT2="$ANDROID_HOME/build-tools/37.0.0/aapt2"
+exec qemu-x86_64 "$AAPT2" "$@"

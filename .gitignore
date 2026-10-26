@@ -34,3 +34,9 @@
 
 # Release-only compiled original exporter bundle.
 /exporters/
+# The Android app's build (android/build.sh).
+/android/java-launcher/target/
+/android/build/
+/android/app/build/
+/android/.gradle/
+/android/local.properties

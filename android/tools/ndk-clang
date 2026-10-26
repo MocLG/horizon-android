@@ -1,0 +1,10 @@
+#!/bin/sh
+# The NDK's clang is an x86_64 binary. On any host, this runs the host's own
+# clang against the NDK's sysroot and runtime libraries instead.
+: "${ANDROID_HOME:=${ANDROID_SDK_ROOT:-$HOME/android-sdk}}"
+: "${ANDROID_NDK_HOME:=$(printf "%s\n" "$ANDROID_HOME"/ndk/* | sort -V | tail -n 1)}"
+: "${HORIZON_ANDROID_API:=29}"
+llvm="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+resource=$(printf "%s\n" "$llvm"/lib/clang/* | sort -V | tail -n 1)
+exec "${HOST_CLANG:-clang}" --target="aarch64-linux-android$HORIZON_ANDROID_API" \
+	--sysroot="$llvm/sysroot" -resource-dir "$resource" -fuse-ld=lld -rtlib=compiler-rt -unwindlib=libunwind -Qunused-arguments "$@"
