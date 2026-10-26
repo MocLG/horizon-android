@@ -81,6 +81,10 @@ pub fn java_environment(paths: &Paths) -> Vec<(&'static str, String)> {
     let jre = paths.jre.display();
     vec![
         ("HORIZON_JAVA", paths.java().display().to_string()),
+        (
+            "HORIZON_JAVAC",
+            paths.libs.join("libhorizonjavac.so").display().to_string(),
+        ),
         ("JAVA_HOME", jre.to_string()),
         (
             "LD_LIBRARY_PATH",

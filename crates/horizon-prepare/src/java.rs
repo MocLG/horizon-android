@@ -237,9 +237,13 @@ fn find_tools(major: i64, more: &[PathBuf], compiler: bool) -> Result<Jdk, Strin
     let mut candidates = Vec::new();
     // A `java` program to use as it is: the Android app's own, since a runtime's
     // bin/java cannot start from an app's data there (android/java-launcher).
+    // HORIZON_JAVAC is its compiler.
     if let Some(java) = std::env::var_os("HORIZON_JAVA").filter(|j| !j.is_empty()) {
         let java = PathBuf::from(java);
-        candidates.push((java.with_file_name("javac"), java, "HORIZON_JAVA"));
+        let javac = std::env::var_os("HORIZON_JAVAC")
+            .filter(|j| !j.is_empty())
+            .map_or_else(|| java.with_file_name("javac"), PathBuf::from);
+        candidates.push((javac, java, "HORIZON_JAVA"));
     }
     if let Some(home) = std::env::var_os("JAVA_HOME").filter(|h| !h.is_empty()) {
         let bin = Path::new(&home).join("bin");
