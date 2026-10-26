@@ -30,6 +30,8 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/crates/horizon-client/Cargo
 commit=$(git -C "$repo" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 export HORIZON_ANDROID_BUILD="${HORIZON_ANDROID_BUILD:-$version+$commit.$(date -u +%Y%m%d%H%M)}"
 jobs="${HORIZON_ANDROID_JOBS:-4}"
+# The Azure app players sign in through (public; Settings can override it).
+export HORIZON_MSA_CLIENT_ID="${HORIZON_MSA_CLIENT_ID:-5be5d759-7f2f-4790-be62-438977cdc7a5}"
 
 rm -rf "$stage"
 mkdir -p "$stage/jniLibs/arm64-v8a" "$stage/assets" "$cache"
