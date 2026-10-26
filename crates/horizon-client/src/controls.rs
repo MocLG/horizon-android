@@ -610,7 +610,8 @@ impl Controls {
         let alpha = if p { style.pressed_alpha } else { style.alpha } * opacity;
         let sp = if p { style.pressed_font_size } else { style.font_size }
             .map_or(TEXT_SP, |s| s as f32);
-        let face = if w.bold { Face::SemiBold } else { Face::Regular };
+        // Zalith draws labels in the system's font (Roboto).
+        let face = if w.bold { Face::SemiBold } else { Face::Control };
         let d = ui.density;
         // Text sizes are in the Ui's dp; the layout's are physical pixels.
         let size = sp * screen.density / d;

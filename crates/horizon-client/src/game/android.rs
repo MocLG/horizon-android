@@ -188,6 +188,19 @@ impl AndroidGame {
             .and_then(|d| d.parse().ok())
             .unwrap_or(2.0);
         let dark = jni::platform("dark", "").as_deref() == Some("1");
+        // Roboto for the control labels, as Zalith's, and symbols Geist lacks.
+        let font = |name: &str| std::fs::read(Path::new("/system/fonts").join(name)).ok();
+        horizon_client::ui_theme::set_system_fonts(
+            font("RobotoStatic-Regular.ttf").or_else(|| font("Roboto-Regular.ttf")),
+            [
+                "NotoSansSymbols-Regular-Subsetted.ttf",
+                "NotoSansSymbols-Regular-Subsetted2.ttf",
+                "NotoSansSymbols2-Regular.ttf",
+            ]
+            .iter()
+            .filter_map(|name| font(name))
+            .collect(),
+        );
         let mut controls = load_controls(&home);
         controls.language = jni::platform("language", "").unwrap_or_default();
         let touch = TouchSettings {

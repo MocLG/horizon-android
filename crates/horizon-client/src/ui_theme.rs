@@ -80,23 +80,68 @@ pub(crate) enum Face {
     Regular,
     Medium,
     SemiBold,
+    /// The platform's interface font where it gave one (Roboto on Android,
+    /// as touch control layouts expect), else Geist.
+    Control,
+    /// The platform's fonts for what the others lack (symbols), in turn.
+    Fallback0,
+    Fallback1,
+    Fallback2,
 }
+
+const FALLBACKS: [Face; 3] = [Face::Fallback0, Face::Fallback1, Face::Fallback2];
+
+/// The platform's fonts: the interface one, then fallbacks for characters
+/// Geist lacks. Set once, before anything draws text.
+static SYSTEM_FONTS: std::sync::OnceLock<(Option<&'static [u8]>, Vec<&'static [u8]>)> =
+    std::sync::OnceLock::new();
+
+pub fn set_system_fonts(interface: Option<Vec<u8>>, fallbacks: Vec<Vec<u8>>) {
+    let usable = |b: Vec<u8>| -> Option<&'static [u8]> {
+        let b: &'static [u8] = Box::leak(b.into_boxed_slice());
+        FontRef::try_from_slice(b).is_ok().then_some(b)
+    };
+    let _ = SYSTEM_FONTS.set((
+        interface.and_then(usable),
+        fallbacks.into_iter().filter_map(usable).take(FALLBACKS.len()).collect(),
+    ));
+}
+
 struct Fonts {
-    faces: [FontRef<'static>; 3],
+    faces: Vec<FontRef<'static>>,
 }
 impl Fonts {
     fn load() -> Self {
         let f = |b: &'static [u8]| FontRef::try_from_slice(b).expect("bundled font");
-        Self {
-            faces: [
-                f(horizon_theme::fonts::GEIST_REGULAR),
-                f(horizon_theme::fonts::GEIST_MEDIUM),
-                f(horizon_theme::fonts::GEIST_SEMIBOLD),
-            ],
+        let (interface, fallbacks) = SYSTEM_FONTS.get().cloned().unwrap_or_default();
+        let regular = horizon_theme::fonts::GEIST_REGULAR;
+        let mut faces = vec![
+            f(regular),
+            f(horizon_theme::fonts::GEIST_MEDIUM),
+            f(horizon_theme::fonts::GEIST_SEMIBOLD),
+            f(interface.unwrap_or(regular)),
+        ];
+        for i in 0..FALLBACKS.len() {
+            faces.push(f(fallbacks.get(i).copied().unwrap_or(regular)));
         }
+        Self { faces }
     }
     fn face(&self, f: Face) -> &FontRef<'static> {
         &self.faces[f as usize]
+    }
+    /// The face that draws `ch`: `face`, else the first fallback that has it.
+    fn resolve(&self, face: Face, ch: char) -> (Face, ab_glyph::GlyphId) {
+        let id = self.face(face).glyph_id(ch);
+        if id.0 != 0 || ch.is_whitespace() {
+            return (face, id);
+        }
+        for f in FALLBACKS.into_iter().chain([Face::Control, Face::Regular]) {
+            let id = self.face(f).glyph_id(ch);
+            if id.0 != 0 {
+                return (f, id);
+            }
+        }
+        (face, id)
     }
     /// The ab_glyph scale for an em size in pixels.
     fn scale(&self, f: Face, px: f32) -> PxScale {
@@ -484,17 +529,18 @@ impl<'a> Ui<'a> {
     pub(crate) fn measure(&self, face: Face, size: f32, text: &str) -> f32 {
         let px = (size * self.density * 4.0).round() / 4.0;
         with_cache(self.atlas, |c| {
-            let font = c.fonts.face(face);
-            let scaled = font.as_scaled(c.fonts.scale(face, px));
             let mut w = 0.0;
             let mut prev = None;
             for ch in text.chars() {
-                let id = font.glyph_id(ch);
-                if let Some(p) = prev {
+                let (f, id) = c.fonts.resolve(face, ch);
+                let scaled = c.fonts.face(f).as_scaled(c.fonts.scale(f, px));
+                if let Some((pf, p)) = prev
+                    && pf == f
+                {
                     w += scaled.kern(p, id);
                 }
                 w += scaled.h_advance(id);
-                prev = Some(id);
+                prev = Some((f, id));
             }
             w / self.density
         })
@@ -529,21 +575,24 @@ impl<'a> Ui<'a> {
             let mut pen = x0;
             let mut prev = None;
             for ch in text.chars() {
-                let (id, advance, kern) = {
-                    let font = c.fonts.face(face);
-                    let id = font.glyph_id(ch);
-                    let f = font.as_scaled(scale);
-                    (id, f.h_advance(id), prev.map_or(0.0, |p| f.kern(p, id)))
+                let (glyph_face, id) = c.fonts.resolve(face, ch);
+                let (advance, kern) = {
+                    let f = c.fonts.face(glyph_face).as_scaled(c.fonts.scale(glyph_face, px));
+                    let kern = match prev {
+                        Some((pf, p)) if pf == glyph_face => f.kern(p, id),
+                        _ => 0.0,
+                    };
+                    (f.h_advance(id), kern)
                 };
                 pen += kern;
                 if real && !ch.is_whitespace() {
-                    let g = c.glyph(atlas, face, id, px);
+                    let g = c.glyph(atlas, glyph_face, id, px);
                     if let Some(rect) = g.rect {
                         quads.push(((pen + g.left).round(), baseline + g.top, rect));
                     }
                 }
                 pen += advance;
-                prev = Some(id);
+                prev = Some((glyph_face, id));
             }
             (pen - x0) / density
         });
