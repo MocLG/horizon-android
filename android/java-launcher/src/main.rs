@@ -3,7 +3,7 @@
 //! this one from its native library folder instead. It loads the runtime's
 //! own launcher library from `JAVA_HOME` and hands it the arguments, as
 //! `bin/java` does. Started under a name with `javac` in it, it is the
-//! compiler, as the JDK builds `bin/javac` from the same launcher.
+//! compiler.
 use std::ffi::{CString, c_char, c_int, c_void};
 
 const RTLD_NOW: c_int = 2;
@@ -68,40 +68,42 @@ fn main() {
     }
     // SAFETY: JLI_Launch has this signature in every JDK since 9.
     let launch: Launch = unsafe { std::mem::transmute(launch) };
-    let mut args: Vec<CString> = std::env::args_os()
-        .map(|a| CString::new(a.into_encoded_bytes()).unwrap())
-        .collect();
-    args[0] = CString::new("java").unwrap();
-    let mut argv: Vec<*mut c_char> = args.iter_mut().map(|a| a.as_ptr().cast_mut()).collect();
-    argv.push(std::ptr::null_mut());
+    // The compiler is java with javac's module as the main one: bin/javac's
+    // own mode (JAVA_ARGS) looks for the runtime beside the program, which
+    // this one is not.
     let javac = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.file_name().map(|n| n.to_string_lossy().contains("javac")))
         .unwrap_or(false);
-    // The JAVA_ARGS the JDK builds bin/javac with.
-    let compiler = [c"-J-ms8m", c"-m", c"jdk.compiler/com.sun.tools.javac.Main"].map(|a| a.as_ptr());
-    let (jargs, name): (&[*const c_char], _) = if javac {
-        (&compiler, c"javac")
-    } else {
-        (&[], c"java")
-    };
-    args[0] = name.to_owned();
-    argv[0] = args[0].as_ptr().cast_mut();
+    let mut args: Vec<CString> = std::env::args_os()
+        .skip(1)
+        .map(|a| CString::new(a.into_encoded_bytes()).unwrap())
+        .collect();
+    if javac {
+        args.splice(
+            0..0,
+            [c"-m", c"jdk.compiler/com.sun.tools.javac.Main"].map(CString::from),
+        );
+    }
+    args.insert(0, CString::from(c"java"));
+    let mut argv: Vec<*mut c_char> = args.iter_mut().map(|a| a.as_ptr().cast_mut()).collect();
+    argv.push(std::ptr::null_mut());
+    let java = c"java".as_ptr();
     // SAFETY: argv is null terminated and outlives the call, which does not
     // return before the program ends.
     let status = unsafe {
         launch(
             args.len() as c_int,
             argv.as_mut_ptr(),
-            jargs.len() as c_int,
-            jargs.as_ptr(),
+            0,
+            std::ptr::null(),
             0,
             std::ptr::null(),
             c"25".as_ptr(),
             c"25".as_ptr(),
-            name.as_ptr(),
-            name.as_ptr(),
-            u8::from(javac),
+            java,
+            java,
+            0,
             1,
             0,
             0,
