@@ -1,0 +1,155 @@
+use super::*;
+
+const SCREEN: Screen = Screen {
+    width: 2340.0,
+    height: 1080.0,
+    density: 2.625,
+    dark: false,
+};
+
+fn centre_of(c: &Controls, label: &str) -> (f32, f32) {
+    let (l, i) = c
+        .layout
+        .layers
+        .iter()
+        .enumerate()
+        .find_map(|(l, layer)| {
+            layer
+                .normal_buttons
+                .iter()
+                .position(|b| b.text.default == label)
+                .map(|i| (l, i))
+        })
+        .unwrap_or_else(|| panic!("no {label} button"));
+    let r = c.button_rect((l, i), SCREEN);
+    (r.x + r.w / 2.0, r.y + r.h / 2.0)
+}
+
+fn keys(c: &mut Controls) -> Vec<(String, bool)> {
+    c.take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Key { name, pressed } | Event::Launcher { name, pressed } => Some((name, pressed)),
+            Event::SendText(_) => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_default_layout_reads_and_writes_back_the_same() {
+    let layout = Layout::parse(DEFAULT_LAYOUT).unwrap();
+    assert_eq!(layout.layers.len(), 5);
+    assert_eq!(layout.styles.len(), 8);
+    let again = Layout::parse(&layout.to_json()).unwrap();
+    assert_eq!(layout, again);
+}
+
+#[test]
+fn colours_read_both_long_forms() {
+    // Kotlin wrote the old form as a signed long: negative when alpha is high.
+    let old: Argb = serde_json::from_str(&((0x8000_0000u64 << 32) as i64).to_string()).unwrap();
+    let older: Argb = serde_json::from_str(&(0x4000_0000u64 << 32).to_string()).unwrap();
+    assert_eq!(older, Argb(0x4000_0000));
+    let new: Argb = serde_json::from_str("2147483648").unwrap();
+    assert_eq!(old, Argb(0x8000_0000));
+    assert_eq!(new, Argb(0x8000_0000));
+    assert_eq!(serde_json::to_string(&new).unwrap(), "2147483648");
+}
+
+#[test]
+fn a_newer_layout_is_refused() {
+    let mut json: serde_json::Value = serde_json::from_str(DEFAULT_LAYOUT).unwrap();
+    json["editorVersion"] = 99.into();
+    assert!(Layout::parse(&json.to_string()).is_err());
+}
+
+#[test]
+fn a_button_sends_its_key_down_and_up() {
+    let mut c = Controls::default_layout();
+    let at = centre_of(&c, "E");
+    assert_eq!(c.down(1, at, true, SCREEN), Claim::Taken);
+    c.up(1, SCREEN);
+    assert_eq!(
+        keys(&mut c),
+        [("GLFW_KEY_E".to_owned(), true), ("GLFW_KEY_E".to_owned(), false)]
+    );
+}
+
+#[test]
+fn penetrable_buttons_let_the_finger_look_too() {
+    let mut c = Controls::default_layout();
+    let at = centre_of(&c, "PRI");
+    assert_eq!(c.down(1, at, true, SCREEN), Claim::MoveOnly);
+    assert_eq!(keys(&mut c), [("GLFW_MOUSE_BUTTON_LEFT".to_owned(), true)]);
+}
+
+#[test]
+fn a_toggle_stays_down_until_pressed_again() {
+    let mut c = Controls::default_layout();
+    let at = centre_of(&c, "□");
+    c.down(1, at, true, SCREEN);
+    c.up(1, SCREEN);
+    assert_eq!(keys(&mut c), [("GLFW_KEY_LEFT_SHIFT".to_owned(), true)]);
+    c.down(2, at, true, SCREEN);
+    c.up(2, SCREEN);
+    assert_eq!(keys(&mut c), [("GLFW_KEY_LEFT_SHIFT".to_owned(), false)]);
+}
+
+#[test]
+fn the_gui_button_switches_the_other_layers() {
+    let mut c = Controls::default_layout();
+    let e = centre_of(&c, "E");
+    let gui = centre_of(&c, "GUI");
+    c.down(1, gui, true, SCREEN);
+    c.up(1, SCREEN);
+    assert_eq!(c.down(2, e, true, SCREEN), Claim::None, "the E button's layer is hidden");
+    c.down(3, gui, true, SCREEN);
+    c.up(3, SCREEN);
+    assert_eq!(c.down(4, e, true, SCREEN), Claim::Taken);
+}
+
+#[test]
+fn in_game_layers_hide_in_menus() {
+    let mut c = Controls::default_layout();
+    let ctrl = centre_of(&c, "Ctrl");
+    assert_eq!(c.down(1, ctrl, false, SCREEN), Claim::None);
+    assert_eq!(c.down(2, ctrl, true, SCREEN), Claim::Taken);
+}
+
+#[test]
+fn the_joystick_walks_eight_ways_and_locks_forward() {
+    let mut c = Controls::default_layout();
+    let (l, i) = (4, 0);
+    let r = c.stick_rect((l, i), SCREEN);
+    let centre = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+    assert_eq!(c.down(1, centre, true, SCREEN), Claim::Taken);
+    assert!(keys(&mut c).is_empty(), "a drag stick waits for the finger to move");
+    c.moved(1, (centre.0, r.y + 2.0), true, SCREEN);
+    assert_eq!(keys(&mut c), [("GLFW_KEY_W".to_owned(), true)]);
+    c.moved(1, (r.x + r.w - 2.0, centre.1 - r.h * 0.4), true, SCREEN);
+    assert_eq!(
+        keys(&mut c),
+        [
+            ("GLFW_KEY_W".to_owned(), false),
+            ("GLFW_KEY_W".to_owned(), true),
+            ("GLFW_KEY_D".to_owned(), true),
+        ]
+    );
+    // Past the top edge: forward, and the lock (sprint) on letting go.
+    c.moved(1, (centre.0, r.y - r.h), true, SCREEN);
+    let events = keys(&mut c);
+    assert!(events.contains(&("GLFW_KEY_LEFT_CONTROL".to_owned(), true)), "{events:?}");
+    c.up(1, SCREEN);
+    assert!(c.sticks[l][i].locked);
+    assert!(!keys(&mut c).contains(&("GLFW_KEY_W".to_owned(), false)));
+}
+
+#[test]
+fn directions_follow_the_angle() {
+    let c = (0.0, 0.0);
+    assert_eq!(direction((10.0, 0.0), c, 1.0), Some(Direction::East));
+    assert_eq!(direction((0.0, -10.0), c, 1.0), Some(Direction::North));
+    assert_eq!(direction((-10.0, 0.0), c, 1.0), Some(Direction::West));
+    assert_eq!(direction((-7.0, 7.0), c, 1.0), Some(Direction::SouthWest));
+    assert_eq!(direction((0.5, 0.0), c, 1.0), None);
+}

@@ -2,53 +2,68 @@
 //! touch screen, the soft keyboard, the back gesture and the window that goes
 //! away while the app is in the background.
 //!
-//! Over a screen a finger is the mouse: a tap clicks, a drag drags, a long
-//! press is a right click and two fingers scroll. In the world the touch
-//! controls (`horizon_client::touch`) move, look, tap to use or attack and
-//! hold to break; they drive the same keys and buttons a keyboard does.
+//! Touch works as in Zalith Launcher 2. The control layout
+//! (`horizon_client::controls`) takes the fingers that land on its buttons
+//! and joysticks. In the world any other finger looks around, and the hotbar
+//! takes taps (select), double taps (swap hands) and long presses (drop).
+//! Over a screen a finger moves a mouse pointer the way a touchpad does: a
+//! tap clicks where it points and a long press holds the button.
 use super::*;
 use crate::android::jni::{self, Typed};
+use horizon_client::controls::{self, Claim, Controls, Event as ControlEvent, Screen as ControlScreen};
 use horizon_client::osk;
-use horizon_client::touch::{self, Button as TouchButton, Layout};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use winit::event::{Touch as Finger, TouchPhase};
 
-/// A press this long without moving is a hold: breaking in the world, a
-/// right click over a screen.
-const HOLD: Duration = Duration::from_millis(320);
-/// How far a finger moves before a tap becomes a drag, in dp.
-const SLOP: f32 = 10.0;
-/// Mouse counts per physical pixel a finger looks with.
-const LOOK: f64 = 0.9;
+/// Zalith's long press and double tap timeouts.
+const LONG_PRESS: Duration = Duration::from_millis(300);
+const DOUBLE_TAP: Duration = Duration::from_millis(300);
+/// How far a finger moves before a tap is a drag, in dp.
+const SLOP: f32 = 8.0;
 
-thread_local! {
-    /// What the controls show, for `draw_touch` in the frame's HUD.
-    static OVERLAY: RefCell<Option<(Layout, touch::State)>> = const { RefCell::new(None) };
+/// What the controls show, for `draw_touch` in the frame's HUD.
+pub(crate) struct Overlay {
+    pub controls: Controls,
+    pub screen: ControlScreen,
+    pub in_game: bool,
+    /// The menu's mouse pointer, physical pixels, while a screen is open.
+    pub pointer: Option<(f32, f32)>,
+    pub shown: bool,
 }
 
-/// The touch controls over the HUD, while they are shown.
+thread_local! {
+    static OVERLAY: RefCell<Option<Overlay>> = const { RefCell::new(None) };
+}
+
+/// The touch controls and the menu's pointer over the HUD.
 pub(crate) fn draw_touch(batch: &mut HudBatch, atlas: &horizon_client::hud::HudAtlas) {
     OVERLAY.with(|o| {
-        if let Some((layout, state)) = &*o.borrow() {
-            touch::draw(batch, atlas, layout, state);
+        if let Some(o) = &mut *o.borrow_mut()
+            && o.shown
+        {
+            o.controls.draw(batch, atlas, o.in_game, o.screen, 1.0);
+            if let Some(at) = o.pointer {
+                controls::draw_pointer(batch, atlas, at, 24.0 * o.screen.density);
+            }
         }
     });
 }
 
+fn with_overlay<R>(f: impl FnOnce(&mut Overlay) -> R) -> Option<R> {
+    OVERLAY.with(|o| o.borrow_mut().as_mut().map(f))
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Role {
-    /// The stick, centred where the thumb landed.
-    Stick((f32, f32)),
-    Button(TouchButton),
-    /// Looking; `held` is the mouse button a hold pressed.
-    Look { held: Option<MouseButton> },
-    Slot,
-    /// The mouse over a screen; `pressed` once a drag pressed the button.
-    Mouse { pressed: bool, done: bool },
-    /// A second finger over a screen: the wheel.
-    Wheel,
-    Ignore,
+    /// A control has it.
+    Control,
+    /// Looking around in the world; a penetrable button may hold it too.
+    Look,
+    /// Moving the menu's pointer; `held` once a long press pressed the button.
+    Pointer { move_only: bool, held: bool },
+    /// On the hotbar, over `slot`.
+    Hotbar { slot: usize, dropped: bool },
 }
 
 struct Contact {
@@ -62,13 +77,37 @@ struct Contact {
 pub(crate) struct AndroidGame {
     app: App,
     contacts: HashMap<u64, Contact>,
-    /// Forward, back, left, right and sprint, as the stick holds them.
-    stick_keys: [bool; 5],
-    releases: Vec<(MouseButton, Instant)>,
+    /// Mouse buttons the controls hold down.
+    buttons: Vec<MouseButton>,
+    /// A launcher scroll event held: the direction and the next wheel step.
+    scrolling: Option<(f32, Instant)>,
+    /// The last tap on the hotbar, for a double tap.
+    last_slot_tap: Option<(usize, Instant)>,
     keyboard: bool,
+    /// The IME button opened the keyboard without a field.
+    forced_keyboard: bool,
     enabled: bool,
     /// Physical pixels per dp.
     dp: f32,
+    dark: bool,
+    was_in_game: bool,
+}
+
+/// The control layout the player picked (`controlLayout` in horizon.txt,
+/// a file in `controls/`), else the default.
+fn load_controls(home: &std::path::Path) -> Controls {
+    let name = horizon_client::ui_theme::preference(home, "controlLayout").unwrap_or_default();
+    if !name.is_empty() {
+        let path = home.join("controls").join(format!("{name}.json"));
+        match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|json| controls::layout::Layout::parse(&json))
+        {
+            Ok(layout) => return Controls::new(layout),
+            Err(e) => log::warn!("Horizon: control layout {}: {e}", path.display()),
+        }
+    }
+    Controls::default_layout()
 }
 
 impl AndroidGame {
@@ -88,14 +127,35 @@ impl AndroidGame {
         let dp = jni::platform("density", "")
             .and_then(|d| d.parse().ok())
             .unwrap_or(2.0);
+        let dark = jni::platform("dark", "").as_deref() == Some("1");
+        let mut controls = load_controls(&home);
+        controls.language = jni::platform("language", "").unwrap_or_default();
+        OVERLAY.with(|o| {
+            *o.borrow_mut() = Some(Overlay {
+                controls,
+                screen: ControlScreen {
+                    width: 1.0,
+                    height: 1.0,
+                    density: dp,
+                    dark,
+                },
+                in_game: false,
+                pointer: None,
+                shown: false,
+            })
+        });
         Ok(Self {
             app: loading_app(options, settings, vanilla_root, None, started)?,
             contacts: HashMap::new(),
-            stick_keys: [false; 5],
-            releases: Vec::new(),
+            buttons: Vec::new(),
+            scrolling: None,
+            last_slot_tap: None,
             keyboard: false,
+            forced_keyboard: false,
             enabled,
             dp,
+            dark,
+            was_in_game: false,
         })
     }
 
@@ -124,6 +184,32 @@ impl AndroidGame {
         }
     }
 
+    fn screen(&self) -> ControlScreen {
+        let size = match &self.app {
+            App::Ready(game) => game.renderer.as_ref().map(|r| [r.config.width, r.config.height]),
+            App::Loading(loading) => loading
+                .renderer
+                .as_ref()
+                .map(|r| [r.config.width, r.config.height]),
+        }
+        .or_else(|| self.window().map(|w| w.inner_size().into()))
+        .unwrap_or([1, 1]);
+        ControlScreen {
+            width: size[0] as f32,
+            height: size[1] as f32,
+            density: self.dp,
+            dark: self.dark,
+        }
+    }
+
+    /// The world has the pointer, with nothing over it.
+    fn in_game(&mut self) -> bool {
+        match &mut self.app {
+            App::Ready(game) => game.touch_playing(),
+            App::Loading(_) => false,
+        }
+    }
+
     pub(crate) fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window().is_none() {
             self.app.resumed(event_loop);
@@ -148,16 +234,18 @@ impl AndroidGame {
     }
 
     /// The app left the screen and its window with it.
-    pub(crate) fn suspended(&mut self) {
+    pub(crate) fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         jni::show_keyboard(false);
         self.keyboard = false;
+        self.forced_keyboard = false;
         if let Some(renderer) = self.renderer() {
             renderer.release_surface();
             renderer.suspended = true;
         }
+        self.contacts.clear();
+        with_overlay(|o| o.controls.release_all());
+        self.apply_control_events(event_loop);
         if let App::Ready(game) = &mut self.app {
-            self.contacts.clear();
-            release_play(game, &mut self.stick_keys);
             game.audio.set_output(false);
         }
     }
@@ -195,108 +283,108 @@ impl AndroidGame {
 
     pub(crate) fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        let typed = jni::take_typed();
-        if let App::Ready(game) = &mut self.app {
-            for t in typed {
-                match t {
-                    Typed::Text(text) => game.pad_osk_output(osk::Output::Text(text)),
-                    Typed::Backspace => game.pad_osk_output(osk::Output::Backspace),
-                    Typed::Enter => game.pad_osk_output(osk::Output::Enter),
-                    Typed::Back => {
-                        if let Err(e) = game.pad_back() {
-                            log::warn!("Horizon: back: {e}");
-                        }
-                    }
-                }
+        let screen = self.screen();
+        let in_game = self.in_game();
+        if in_game != self.was_in_game {
+            self.was_in_game = in_game;
+            if !in_game {
+                self.release_mouse_buttons();
             }
+        }
+        let enabled = self.enabled;
+        with_overlay(|o| {
+            o.screen = screen;
+            o.in_game = in_game;
+            o.shown = enabled;
+            if in_game {
+                o.pointer = None;
+            } else if o.pointer.is_none() {
+                // A screen opens with the pointer in the middle, as Zalith's does.
+                o.pointer = Some((screen.width / 2.0, screen.height / 2.0));
+            }
+        });
+        self.typed();
+        self.timers(event_loop, now);
+        self.apply_control_events(event_loop);
+        if let Some((lines, next)) = self.scrolling
+            && now >= next
+        {
+            self.wheel(event_loop, lines);
+            self.scrolling = Some((lines, now + Duration::from_millis(80)));
+        }
+        if let App::Ready(game) = &mut self.app {
             let typing = game.pad_typing()
                 || game.title.as_mut().is_some_and(|t| t.focused_field().is_some());
-            if typing != self.keyboard {
-                self.keyboard = typing;
-                jni::show_keyboard(typing);
-            }
-            let playing = self.enabled && game.touch_playing();
-            if !playing {
-                release_play(game, &mut self.stick_keys);
-                for contact in self.contacts.values_mut() {
-                    if matches!(contact.role, Role::Stick(_) | Role::Look { .. } | Role::Button(_)) {
-                        contact.role = Role::Ignore;
-                    }
-                }
-            }
-            // A finger resting on the world: break, or use what is held over time.
-            for contact in self.contacts.values_mut() {
-                if let Role::Look { held: None } = contact.role
-                    && !contact.moved
-                    && now - contact.since >= HOLD
-                {
-                    let button = if game.holds_item_used_over_time() {
-                        MouseButton::Right
-                    } else {
-                        MouseButton::Left
-                    };
-                    contact.role = Role::Look { held: Some(button) };
-                    let _ = game.play_mouse(button, true);
-                }
-            }
-            for (button, _) in self.releases.extract_if(.., |(_, at)| now >= *at) {
-                let _ = game.play_mouse(button, false);
-            }
-            let overlay = playing.then(|| {
-                let (layout, sneaking) = game.touch_layout(self.dp);
-                let mut state = touch::State {
-                    opacity: 0.85,
-                    sneaking,
-                    ..Default::default()
-                };
-                for c in self.contacts.values() {
-                    match c.role {
-                        Role::Stick(centre) => {
-                            state.stick = Some((centre, clamp_stick(centre, c.at, layout.stick)));
-                        }
-                        Role::Button(b) => state.pressed.push(b),
-                        _ => {}
-                    }
-                }
-                (layout, state)
-            });
-            OVERLAY.with(|o| *o.borrow_mut() = overlay);
-        }
-        // Over a screen, a finger resting without moving is a right click.
-        let mut right_clicks = Vec::new();
-        for contact in self.contacts.values_mut() {
-            if let Role::Mouse {
-                pressed: false,
-                done: false,
-            } = contact.role
-                && !contact.moved
-                && now - contact.since >= HOLD
-            {
-                contact.role = Role::Mouse {
-                    pressed: false,
-                    done: true,
-                };
-                right_clicks.push(contact.at);
-            }
-        }
-        if let Some(id) = self.window().map(|w| w.id()) {
-            for at in right_clicks {
-                self.mouse(event_loop, id, at, Some((MouseButton::Right, true)));
-                self.mouse(event_loop, id, at, Some((MouseButton::Right, false)));
-                jni::vibrate(15);
+            let want = typing || self.forced_keyboard;
+            if want != self.keyboard {
+                self.keyboard = want;
+                jni::show_keyboard(want);
             }
         }
         self.app.about_to_wait(event_loop);
     }
 
-    /// The cursor at `at` (physical pixels), and a button's press or release.
-    fn mouse(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        id: WindowId,
-        at: (f32, f32),
-        button: Option<(MouseButton, bool)>,
-    ) {
+    fn typed(&mut self) {
+        let typed = jni::take_typed();
+        let App::Ready(game) = &mut self.app else {
+            return;
+        };
+        for t in typed {
+            match t {
+                Typed::Text(text) => game.pad_osk_output(osk::Output::Text(text)),
+                Typed::Backspace => game.pad_osk_output(osk::Output::Backspace),
+                Typed::Enter => game.pad_osk_output(osk::Output::Enter),
+                Typed::Back => {
+                    if let Err(e) = game.pad_back() {
+                        log::warn!("Horizon: back: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Long presses: the menu pointer's button and the hotbar's drop.
+    fn timers(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
+        let mut hold = false;
+        let mut drop = false;
+        for contact in self.contacts.values_mut() {
+            if contact.moved || now - contact.since < LONG_PRESS {
+                continue;
+            }
+            match &mut contact.role {
+                Role::Pointer {
+                    move_only: false,
+                    held,
+                } if !*held => {
+                    *held = true;
+                    hold = true;
+                }
+                Role::Hotbar { dropped, .. } if !*dropped => {
+                    *dropped = true;
+                    drop = true;
+                }
+                _ => {}
+            }
+        }
+        let Some(id) = self.window().map(|w| w.id()) else {
+            return;
+        };
+        if hold {
+            self.menu_mouse(event_loop, id, MouseButton::Left, true);
+        }
+        if drop && let App::Ready(game) = &mut self.app {
+            tap_key(game, KeyCode::KeyQ);
+            jni::vibrate(15);
+        }
+    }
+
+    fn pointer(&self) -> (f32, f32) {
+        with_overlay(|o| o.pointer).flatten().unwrap_or((0.0, 0.0))
+    }
+
+    /// The cursor where the menu's pointer is, and a button pressed or released there.
+    fn menu_mouse(&mut self, event_loop: &ActiveEventLoop, id: WindowId, button: MouseButton, pressed: bool) {
+        let at = self.pointer();
         let device_id = DeviceId::dummy();
         self.app.window_event(
             event_loop,
@@ -306,45 +394,169 @@ impl AndroidGame {
                 position: winit::dpi::PhysicalPosition::new(f64::from(at.0), f64::from(at.1)),
             },
         );
-        if let Some((button, pressed)) = button {
-            self.app.window_event(
-                event_loop,
-                id,
-                WindowEvent::MouseInput {
-                    device_id,
-                    state: if pressed {
-                        ElementState::Pressed
-                    } else {
-                        ElementState::Released
-                    },
-                    button,
+        self.app.window_event(
+            event_loop,
+            id,
+            WindowEvent::MouseInput {
+                device_id,
+                state: if pressed {
+                    ElementState::Pressed
+                } else {
+                    ElementState::Released
                 },
+                button,
+            },
+        );
+    }
+
+    fn move_pointer(&mut self, event_loop: &ActiveEventLoop, id: WindowId, delta: (f32, f32)) {
+        let screen = self.screen();
+        let at = with_overlay(|o| {
+            let p = o.pointer.unwrap_or((screen.width / 2.0, screen.height / 2.0));
+            let p = (
+                (p.0 + delta.0).clamp(0.0, screen.width),
+                (p.1 + delta.1).clamp(0.0, screen.height),
             );
+            o.pointer = Some(p);
+            p
+        })
+        .unwrap_or_default();
+        self.app.window_event(
+            event_loop,
+            id,
+            WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: winit::dpi::PhysicalPosition::new(f64::from(at.0), f64::from(at.1)),
+            },
+        );
+    }
+
+    fn wheel(&mut self, event_loop: &ActiveEventLoop, lines: f32) {
+        let Some(id) = self.window().map(|w| w.id()) else {
+            return;
+        };
+        self.app.window_event(
+            event_loop,
+            id,
+            WindowEvent::MouseWheel {
+                device_id: DeviceId::dummy(),
+                delta: MouseScrollDelta::LineDelta(0.0, lines),
+                phase: TouchPhase::Moved,
+            },
+        );
+    }
+
+    /// A mouse button from the controls: the game's in the world, the
+    /// menu pointer's over a screen.
+    fn mouse_button(&mut self, event_loop: &ActiveEventLoop, button: MouseButton, pressed: bool) {
+        if pressed {
+            self.buttons.push(button);
+        } else {
+            self.buttons.retain(|b| *b != button);
+        }
+        if self.in_game() {
+            if let App::Ready(game) = &mut self.app {
+                let _ = game.play_mouse(button, pressed);
+            }
+        } else if let Some(id) = self.window().map(|w| w.id()) {
+            self.menu_mouse(event_loop, id, button, pressed);
+        }
+    }
+
+    fn release_mouse_buttons(&mut self) {
+        if let App::Ready(game) = &mut self.app {
+            for button in std::mem::take(&mut self.buttons) {
+                let _ = game.play_mouse(button, false);
+            }
+        }
+    }
+
+    /// What the controls asked for: keys, mouse buttons, the launcher's events.
+    fn apply_control_events(&mut self, event_loop: &ActiveEventLoop) {
+        let events = with_overlay(|o| o.controls.take_events()).unwrap_or_default();
+        for event in events {
+            match event {
+                ControlEvent::Key { name, pressed } | ControlEvent::Launcher { name, pressed }
+                    if mouse_button(&name).is_some() =>
+                {
+                    self.mouse_button(event_loop, mouse_button(&name).unwrap(), pressed);
+                }
+                ControlEvent::Key { name, pressed } => {
+                    let Some(key) = glfw_key(&name) else {
+                        log::warn!("Horizon: the control layout's key {name} has no key here");
+                        continue;
+                    };
+                    if let App::Ready(game) = &mut self.app {
+                        if key == KeyCode::Escape {
+                            if pressed {
+                                let _ = game.pad_back();
+                            }
+                        } else {
+                            let _ = game.mapped_key(key, pressed, false);
+                        }
+                    }
+                }
+                ControlEvent::Launcher { name, pressed } => match name.as_str() {
+                    "launcher.event.switch_ime" if pressed => {
+                        self.forced_keyboard = !self.forced_keyboard;
+                    }
+                    "launcher.event.scroll_up" | "launcher.event.scroll_down" => {
+                        let lines = if name.ends_with("up") { 1.0 } else { -1.0 };
+                        self.scrolling = pressed.then(|| (lines, Instant::now()));
+                    }
+                    "launcher.event.scroll_up.single" if pressed => self.wheel(event_loop, 1.0),
+                    "launcher.event.scroll_down.single" if pressed => self.wheel(event_loop, -1.0),
+                    "launcher.event.switch_menu" if pressed => self.back(),
+                    _ => {}
+                },
+                ControlEvent::SendText(text) => {
+                    if let App::Ready(game) = &mut self.app {
+                        if game.screen != Screen::Chat {
+                            tap_key(game, KeyCode::KeyT);
+                        }
+                        game.pad_osk_output(osk::Output::Text(text));
+                        game.pad_osk_output(osk::Output::Enter);
+                    }
+                }
+            }
         }
     }
 
     fn touch(&mut self, event_loop: &ActiveEventLoop, id: WindowId, finger: Finger) {
         let at = (finger.location.x as f32, finger.location.y as f32);
         let now = Instant::now();
+        let screen = self.screen();
+        let in_game = self.in_game();
         let slop = SLOP * self.dp;
         match finger.phase {
             TouchPhase::Started => {
-                let role = self.role_for(at);
-                if let Role::Button(b) = role
-                    && let App::Ready(game) = &mut self.app
-                {
-                    jni::vibrate(10);
-                    game.touch_button(b, true);
-                }
-                if let (Role::Slot, App::Ready(game)) = (role, &mut self.app) {
-                    let (layout, _) = game.touch_layout(self.dp);
-                    if let Some(slot) = layout.slot_at(at) {
-                        game.selected = slot;
-                    }
-                }
-                if matches!(role, Role::Mouse { .. }) {
-                    self.mouse(event_loop, id, at, None);
-                }
+                let claim = if self.enabled {
+                    with_overlay(|o| o.controls.down(finger.id, at, in_game, screen)).unwrap_or(Claim::None)
+                } else {
+                    Claim::None
+                };
+                let role = match claim {
+                    Claim::Taken => Role::Control,
+                    Claim::MoveOnly if in_game => Role::Look,
+                    Claim::MoveOnly => Role::Pointer {
+                        move_only: true,
+                        held: false,
+                    },
+                    Claim::None => match self.hotbar_slot(at) {
+                        Some(slot) if in_game => {
+                            self.select_slot(slot);
+                            Role::Hotbar {
+                                slot,
+                                dropped: false,
+                            }
+                        }
+                        _ if in_game => Role::Look,
+                        _ => Role::Pointer {
+                            move_only: false,
+                            held: false,
+                        },
+                    },
+                };
                 self.contacts.insert(
                     finger.id,
                     Contact {
@@ -357,6 +569,10 @@ impl AndroidGame {
                 );
             }
             TouchPhase::Moved => {
+                if self.enabled {
+                    with_overlay(|o| o.controls.moved(finger.id, at, in_game, screen));
+                }
+                let hotbar = self.hotbar_slot(at);
                 let Some(contact) = self.contacts.get_mut(&finger.id) else {
                     return;
                 };
@@ -365,186 +581,190 @@ impl AndroidGame {
                 if !contact.moved && (at.0 - contact.start.0).hypot(at.1 - contact.start.1) > slop {
                     contact.moved = true;
                 }
-                let (role, moved, start) = (contact.role, contact.moved, contact.start);
-                match role {
-                    Role::Stick(centre) => {
+                let delta = (at.0 - last.0, at.1 - last.1);
+                match &mut contact.role {
+                    Role::Look => {
                         if let App::Ready(game) = &mut self.app {
-                            let (layout, _) = game.touch_layout(self.dp);
-                            let thumb = clamp_stick(centre, at, layout.stick);
-                            let keys = touch::stick_keys(
-                                (thumb.0 - centre.0) / layout.stick,
-                                (thumb.1 - centre.1) / layout.stick,
-                            );
-                            set_stick_keys(game, &mut self.stick_keys, keys);
-                        }
-                    }
-                    Role::Look { .. } => {
-                        if let App::Ready(game) = &mut self.app {
-                            let (dx, dy) = (f64::from(at.0 - last.0), f64::from(at.1 - last.1));
-                            game.mouse.on_move(0.0, 0.0, dx * LOOK, dy * LOOK, true, true);
+                            game.mouse
+                                .on_move(0.0, 0.0, f64::from(delta.0), f64::from(delta.1), true, true);
                             game.last_input = now;
                         }
                     }
-                    Role::Mouse { pressed, done } if moved && !done => {
-                        if !pressed {
-                            self.mouse(event_loop, id, start, Some((MouseButton::Left, true)));
-                            if let Some(c) = self.contacts.get_mut(&finger.id) {
-                                c.role = Role::Mouse {
-                                    pressed: true,
-                                    done: false,
-                                };
-                            }
-                        }
-                        self.mouse(event_loop, id, at, None);
-                    }
-                    Role::Wheel => {
-                        let lines = (last.1 - at.1) / (36.0 * self.dp);
-                        if lines != 0.0 {
-                            self.app.window_event(
-                                event_loop,
-                                id,
-                                WindowEvent::MouseWheel {
-                                    device_id: DeviceId::dummy(),
-                                    delta: MouseScrollDelta::LineDelta(0.0, -lines),
-                                    phase: TouchPhase::Moved,
-                                },
-                            );
+                    Role::Pointer { .. } => self.move_pointer(event_loop, id, delta),
+                    Role::Hotbar { slot, .. } => {
+                        if let Some(over) = hotbar {
+                            *slot = over;
                         }
                     }
-                    _ => {}
+                    Role::Control => {}
                 }
             }
             TouchPhase::Ended | TouchPhase::Cancelled => {
+                if self.enabled {
+                    with_overlay(|o| o.controls.up(finger.id, screen));
+                }
                 let Some(contact) = self.contacts.remove(&finger.id) else {
                     return;
                 };
                 let cancelled = finger.phase == TouchPhase::Cancelled;
                 match contact.role {
-                    Role::Stick(_) => {
-                        if let App::Ready(game) = &mut self.app {
-                            set_stick_keys(game, &mut self.stick_keys, [false; 5]);
+                    Role::Pointer {
+                        move_only: false,
+                        held,
+                    } => {
+                        if held {
+                            self.menu_mouse(event_loop, id, MouseButton::Left, false);
+                        } else if !contact.moved && !cancelled && now - contact.since <= LONG_PRESS {
+                            self.menu_mouse(event_loop, id, MouseButton::Left, true);
+                            self.menu_mouse(event_loop, id, MouseButton::Left, false);
                         }
                     }
-                    Role::Button(b) => {
-                        if let App::Ready(game) = &mut self.app {
-                            game.touch_button(b, false);
-                        }
-                    }
-                    Role::Look { held } => {
-                        if let App::Ready(game) = &mut self.app {
-                            if let Some(button) = held {
-                                let _ = game.play_mouse(button, false);
-                            } else if !contact.moved && !cancelled {
-                                // A tap: hit what is under the crosshair, else use the hand.
-                                let button = if game.crosshair_living().is_some() {
-                                    MouseButton::Left
-                                } else {
-                                    MouseButton::Right
-                                };
-                                let _ = game.play_mouse(button, true);
-                                self.releases.push((button, now + Duration::from_millis(110)));
+                    Role::Hotbar { slot, dropped } if !dropped && !cancelled => {
+                        let double = self
+                            .last_slot_tap
+                            .is_some_and(|(last, at)| last == slot && now - at < DOUBLE_TAP);
+                        if double {
+                            self.last_slot_tap = None;
+                            if let App::Ready(game) = &mut self.app {
+                                tap_key(game, KeyCode::KeyF);
                             }
+                        } else {
+                            self.last_slot_tap = Some((slot, now));
                         }
                     }
-                    Role::Mouse { pressed, done } => {
-                        if pressed {
-                            self.mouse(event_loop, id, contact.at, Some((MouseButton::Left, false)));
-                        } else if !done && !cancelled {
-                            self.mouse(event_loop, id, contact.at, Some((MouseButton::Left, true)));
-                            self.mouse(event_loop, id, contact.at, Some((MouseButton::Left, false)));
-                        }
-                    }
-                    Role::Slot | Role::Wheel | Role::Ignore => {}
+                    _ => {}
                 }
             }
         }
     }
 
-    /// What a finger landing at `at` does.
-    fn role_for(&mut self, at: (f32, f32)) -> Role {
-        let enabled = self.enabled;
-        let dp = self.dp;
-        let others = self.contacts.values().any(|c| matches!(c.role, Role::Mouse { .. }));
-        let App::Ready(game) = &mut self.app else {
-            return if others { Role::Wheel } else { Role::Mouse { pressed: false, done: false } };
-        };
-        if !(enabled && game.touch_playing()) {
-            if others {
-                // Two fingers scroll; the first one's click is off.
-                for c in self.contacts.values_mut() {
-                    if let Role::Mouse { pressed: false, .. } = c.role {
-                        c.role = Role::Mouse {
-                            pressed: false,
-                            done: true,
-                        };
-                    }
-                }
-                return Role::Wheel;
-            }
-            return Role::Mouse {
-                pressed: false,
-                done: false,
-            };
+    /// The hotbar slot under `at` (physical pixels): vanilla's 9 slots of
+    /// 20 GUI pixels, centred at the bottom.
+    fn hotbar_slot(&self, at: (f32, f32)) -> Option<usize> {
+        let screen = self.screen();
+        let scale = HudBatch::new([screen.width as u32, screen.height as u32]).scale;
+        let slot = 20.0 * scale;
+        let left = (screen.width - 9.0 * slot) / 2.0;
+        if at.1 < screen.height - slot || at.0 < left || at.0 >= left + 9.0 * slot {
+            return None;
         }
-        let (layout, _) = game.touch_layout(dp);
-        let height = game.window.as_ref().map_or(1.0, |w| w.inner_size().height as f32);
-        if let Some(b) = layout.button_at(at) {
-            Role::Button(b)
-        } else if layout.slot_at(at).is_some() {
-            Role::Slot
-        } else if layout.in_stick_zone(at, height)
-            && !self.contacts.values().any(|c| matches!(c.role, Role::Stick(_)))
-        {
-            Role::Stick(at)
-        } else {
-            Role::Look { held: None }
+        Some((((at.0 - left) / slot) as usize).min(8))
+    }
+
+    fn select_slot(&mut self, slot: usize) {
+        if let App::Ready(game) = &mut self.app {
+            game.selected = slot;
         }
     }
 }
 
-fn clamp_stick(centre: (f32, f32), at: (f32, f32), radius: f32) -> (f32, f32) {
-    let (dx, dy) = (at.0 - centre.0, at.1 - centre.1);
-    let length = dx.hypot(dy);
-    if length <= radius {
-        at
-    } else {
-        (centre.0 + dx / length * radius, centre.1 + dy / length * radius)
-    }
+fn tap_key(game: &mut Game, key: KeyCode) {
+    let _ = game.mapped_key(key, true, false);
+    let _ = game.mapped_key(key, false, false);
 }
 
-const STICK_KEYS: [KeyCode; 5] = [
-    KeyCode::KeyW,
-    KeyCode::KeyS,
-    KeyCode::KeyA,
-    KeyCode::KeyD,
-    KeyCode::ControlLeft,
-];
-
-fn set_stick_keys(game: &mut Game, held: &mut [bool; 5], keys: [bool; 5]) {
-    for i in 0..5 {
-        if held[i] != keys[i] {
-            held[i] = keys[i];
-            let _ = game.mapped_key(STICK_KEYS[i], keys[i], false);
-        }
-    }
+fn mouse_button(name: &str) -> Option<MouseButton> {
+    Some(match name {
+        "GLFW_MOUSE_BUTTON_LEFT" | "GLFW_MOUSE_BUTTON_1" => MouseButton::Left,
+        "GLFW_MOUSE_BUTTON_RIGHT" | "GLFW_MOUSE_BUTTON_2" => MouseButton::Right,
+        "GLFW_MOUSE_BUTTON_MIDDLE" | "GLFW_MOUSE_BUTTON_3" => MouseButton::Middle,
+        "GLFW_MOUSE_BUTTON_4" => MouseButton::Back,
+        "GLFW_MOUSE_BUTTON_5" => MouseButton::Forward,
+        _ => return None,
+    })
 }
 
-/// Nothing the controls hold stays held behind a screen.
-fn release_play(game: &mut Game, held: &mut [bool; 5]) {
-    set_stick_keys(game, held, [false; 5]);
-    for button in [MouseButton::Left, MouseButton::Right] {
-        let down = match button {
-            MouseButton::Left => game.left,
-            _ => game.right,
-        };
-        if down {
-            let _ = game.play_mouse(button, false);
-        }
+/// A GLFW key name (`GLFW_KEY_E`) as the key it names.
+fn glfw_key(name: &str) -> Option<KeyCode> {
+    use KeyCode as K;
+    let key = name.strip_prefix("GLFW_KEY_")?;
+    if key.len() == 1 {
+        let c = key.as_bytes()[0];
+        return Some(match c {
+            b'A'..=b'Z' => [
+                K::KeyA, K::KeyB, K::KeyC, K::KeyD, K::KeyE, K::KeyF, K::KeyG, K::KeyH, K::KeyI,
+                K::KeyJ, K::KeyK, K::KeyL, K::KeyM, K::KeyN, K::KeyO, K::KeyP, K::KeyQ, K::KeyR,
+                K::KeyS, K::KeyT, K::KeyU, K::KeyV, K::KeyW, K::KeyX, K::KeyY, K::KeyZ,
+            ][usize::from(c - b'A')],
+            b'0'..=b'9' => [
+                K::Digit0, K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digit5, K::Digit6,
+                K::Digit7, K::Digit8, K::Digit9,
+            ][usize::from(c - b'0')],
+            _ => return None,
+        });
     }
+    if let Some(n) = key.strip_prefix('F').and_then(|n| n.parse::<usize>().ok()) {
+        return [
+            K::F1, K::F2, K::F3, K::F4, K::F5, K::F6, K::F7, K::F8, K::F9, K::F10, K::F11, K::F12,
+            K::F13, K::F14, K::F15, K::F16, K::F17, K::F18, K::F19, K::F20, K::F21, K::F22, K::F23,
+            K::F24, K::F25,
+        ]
+        .get(n.wrapping_sub(1))
+        .copied();
+    }
+    if let Some(n) = key.strip_prefix("KP_").and_then(|n| n.parse::<usize>().ok()) {
+        return [
+            K::Numpad0, K::Numpad1, K::Numpad2, K::Numpad3, K::Numpad4, K::Numpad5, K::Numpad6,
+            K::Numpad7, K::Numpad8, K::Numpad9,
+        ]
+        .get(n)
+        .copied();
+    }
+    Some(match key {
+        "SPACE" => K::Space,
+        "APOSTROPHE" => K::Quote,
+        "COMMA" => K::Comma,
+        "MINUS" => K::Minus,
+        "PERIOD" => K::Period,
+        "SLASH" => K::Slash,
+        "SEMICOLON" => K::Semicolon,
+        "EQUAL" => K::Equal,
+        "LEFT_BRACKET" => K::BracketLeft,
+        "BACKSLASH" => K::Backslash,
+        "RIGHT_BRACKET" => K::BracketRight,
+        "GRAVE_ACCENT" => K::Backquote,
+        "WORLD_1" | "WORLD_2" => K::IntlBackslash,
+        "ESCAPE" => K::Escape,
+        "ENTER" => K::Enter,
+        "TAB" => K::Tab,
+        "BACKSPACE" => K::Backspace,
+        "INSERT" => K::Insert,
+        "DELETE" => K::Delete,
+        "RIGHT" => K::ArrowRight,
+        "LEFT" => K::ArrowLeft,
+        "DOWN" => K::ArrowDown,
+        "UP" => K::ArrowUp,
+        "PAGE_UP" => K::PageUp,
+        "PAGE_DOWN" => K::PageDown,
+        "HOME" => K::Home,
+        "END" => K::End,
+        "CAPS_LOCK" => K::CapsLock,
+        "SCROLL_LOCK" => K::ScrollLock,
+        "NUM_LOCK" => K::NumLock,
+        "PRINT_SCREEN" => K::PrintScreen,
+        "PAUSE" => K::Pause,
+        "KP_DECIMAL" => K::NumpadDecimal,
+        "KP_DIVIDE" => K::NumpadDivide,
+        "KP_MULTIPLY" => K::NumpadMultiply,
+        "KP_SUBTRACT" => K::NumpadSubtract,
+        "KP_ADD" => K::NumpadAdd,
+        "KP_ENTER" => K::NumpadEnter,
+        "KP_EQUAL" => K::NumpadEqual,
+        "LEFT_SHIFT" => K::ShiftLeft,
+        "LEFT_CONTROL" => K::ControlLeft,
+        "LEFT_ALT" => K::AltLeft,
+        "LEFT_SUPER" => K::SuperLeft,
+        "RIGHT_SHIFT" => K::ShiftRight,
+        "RIGHT_CONTROL" => K::ControlRight,
+        "RIGHT_ALT" => K::AltRight,
+        "RIGHT_SUPER" => K::SuperRight,
+        "MENU" => K::ContextMenu,
+        _ => return None,
+    })
 }
 
 impl Game<'_> {
-    /// The world is on screen with nothing over it: the touch controls act.
+    /// The world is on screen with nothing over it: the game has the pointer.
     fn touch_playing(&mut self) -> bool {
         self.screen == Screen::Playing
             && self.title.is_none()
@@ -556,52 +776,22 @@ impl Game<'_> {
             && !self.dialog_open()
             && self.server_packs.prompt.is_none()
     }
+}
 
-    /// The controls' layout on this window, and whether the player sneaks.
-    fn touch_layout(&self, dp: f32) -> (Layout, bool) {
-        let size = self
-            .renderer
-            .as_ref()
-            .map_or([1, 1], |r| [r.config.width, r.config.height]);
-        let scale = HudBatch::new(size).scale;
-        let layout = Layout::new(size[0] as f32, size[1] as f32, dp, 1.0, scale);
-        (layout, self.keys.contains(&KeyCode::ShiftLeft))
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// The held stack is used over time (food, a bow, a spyglass): a hold uses it.
-    fn holds_item_used_over_time(&self) -> bool {
-        self.held().is_some_and(|stack| {
-            let view = horizon_client::item_render::stack_view(stack);
-            item_draw::use_duration(&self.pack.item_renderer.models.components(&view)) > 0
-        })
-    }
-
-    fn touch_button(&mut self, button: TouchButton, down: bool) {
-        let tap = |game: &mut Self, key: KeyCode| {
-            if down {
-                let _ = game.mapped_key(key, true, false);
-                let _ = game.mapped_key(key, false, false);
-            }
-        };
-        match button {
-            TouchButton::Jump => {
-                let _ = self.mapped_key(KeyCode::Space, down, false);
-            }
-            TouchButton::Sneak => {
-                if down {
-                    let sneaking = self.keys.contains(&KeyCode::ShiftLeft);
-                    let _ = self.mapped_key(KeyCode::ShiftLeft, !sneaking, false);
-                }
-            }
-            TouchButton::Inventory => tap(self, KeyCode::KeyE),
-            TouchButton::Drop => tap(self, KeyCode::KeyQ),
-            TouchButton::Chat => tap(self, KeyCode::KeyT),
-            TouchButton::Perspective => tap(self, KeyCode::F5),
-            TouchButton::Pause => {
-                if down {
-                    let _ = self.pad_back();
-                }
-            }
-        }
+    #[test]
+    fn glfw_names_map_to_keys() {
+        assert_eq!(glfw_key("GLFW_KEY_E"), Some(KeyCode::KeyE));
+        assert_eq!(glfw_key("GLFW_KEY_7"), Some(KeyCode::Digit7));
+        assert_eq!(glfw_key("GLFW_KEY_F3"), Some(KeyCode::F3));
+        assert_eq!(glfw_key("GLFW_KEY_F25"), Some(KeyCode::F25));
+        assert_eq!(glfw_key("GLFW_KEY_F26"), None);
+        assert_eq!(glfw_key("GLFW_KEY_KP_5"), Some(KeyCode::Numpad5));
+        assert_eq!(glfw_key("GLFW_KEY_LEFT_CONTROL"), Some(KeyCode::ControlLeft));
+        assert_eq!(glfw_key("GLFW_KEY_UNKNOWN"), None);
+        assert_eq!(mouse_button("GLFW_MOUSE_BUTTON_RIGHT"), Some(MouseButton::Right));
     }
 }

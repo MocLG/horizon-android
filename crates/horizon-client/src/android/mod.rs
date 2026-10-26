@@ -1,6 +1,7 @@
 //! The app around the game: logcat, the activity's Java side, the folders,
 //! and the launcher that runs before the game in the same window.
 pub mod backend;
+mod controls;
 mod draw;
 pub mod install;
 pub mod jni;

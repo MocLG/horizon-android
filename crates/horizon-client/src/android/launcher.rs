@@ -4,6 +4,7 @@
 use super::draw::{Face, Rect, Renderer, hex};
 use super::install::{self, Paths, Task};
 use super::jni;
+use super::controls;
 use super::ui::{CONTROL, GUTTER, Pointer, ROW, Ui};
 use crate::account;
 use horizon_theme::DARK as P;
@@ -594,12 +595,56 @@ impl Launcher {
             row,
             i,
             "Touch controls",
-            "A stick to move, buttons to jump and sneak, drag to look. Off with a controller or keyboard.",
+            "Buttons and a joystick over the game, as in Zalith Launcher 2. Off with a controller or keyboard.",
             48.0,
         );
         if let Some(on) = ui.switch(row, self.touch) {
             self.touch = on;
             set_preference(&self.paths.home, "touchControls", if on { "true" } else { "false" });
+        }
+        // The control layout, and Zalith Launcher 2's layouts in and out.
+        let (row, i) = next(&mut y);
+        let layouts = controls::layouts(&self.paths.home);
+        let current = controls::selected(&self.paths.home);
+        let index = layouts.iter().position(|(file, _)| *file == current).unwrap_or(0);
+        let name = layouts.get(index).map_or("Default", |(_, name)| name.as_str());
+        ui.row(
+            row,
+            i,
+            "Control layout",
+            &format!("{name}, {} of {}.", index + 1, layouts.len()),
+            90.0,
+        );
+        if ui.row_button(row, "Next", false, layouts.len() > 1) {
+            let (file, _) = &layouts[(index + 1) % layouts.len()];
+            set_preference(&self.paths.home, "controlLayout", file);
+        }
+        let (row, i) = next(&mut y);
+        let folder = self.paths.shared.join("controls");
+        ui.row(
+            row,
+            i,
+            "Import and export layouts",
+            &format!(
+                "Zalith Launcher 2's layouts work as they are: copy their .json files to {}, then Import. Export puts the current layout there.",
+                folder.display()
+            ),
+            190.0,
+        );
+        let export = ui.button_width("Export");
+        let import_rect = Rect::new(row.right() - export - 8.0 - ui.button_width("Import"), row.y + (row.h - CONTROL) / 2.0, ui.button_width("Import"), CONTROL);
+        if ui.button(import_rect, "Import", false, true) {
+            self.error = Some(match controls::import(&folder, &self.paths.home) {
+                Ok(0) => format!("No layouts to import in {}.", folder.display()),
+                Ok(n) => format!("Imported {n} control layouts."),
+                Err(e) => e,
+            });
+        }
+        if ui.row_button(row, "Export", false, true) {
+            self.error = Some(match controls::export(&self.paths.home, &folder) {
+                Ok(file) => format!("Exported to {}.", file.display()),
+                Err(e) => e,
+            });
         }
         // Where a Minecraft folder can be copied to.
         let (row, i) = next(&mut y);

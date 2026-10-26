@@ -57,10 +57,10 @@ impl ApplicationHandler for Shell {
             State::Game(g) => g.resumed(event_loop),
         }
     }
-    fn suspended(&mut self, _: &ActiveEventLoop) {
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         match &mut self.state {
             State::Launcher(l) => l.suspended(),
-            State::Game(g) => g.suspended(),
+            State::Game(g) => g.suspended(event_loop),
         }
     }
     fn user_event(&mut self, _: &ActiveEventLoop, (): ()) {}

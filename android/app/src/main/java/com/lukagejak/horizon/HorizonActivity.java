@@ -146,6 +146,12 @@ public class HorizonActivity extends NativeActivity {
                 return insets();
             case "density":
                 return Float.toString(getResources().getDisplayMetrics().density);
+            case "dark":
+                return (getResources().getConfiguration().uiMode
+                        & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                        == android.content.res.Configuration.UI_MODE_NIGHT_YES ? "1" : "0";
+            case "language":
+                return java.util.Locale.getDefault().toLanguageTag();
             case "model":
                 return Build.MANUFACTURER + " " + Build.MODEL + " (Android " + Build.VERSION.RELEASE + ")";
             default:

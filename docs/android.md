@@ -27,25 +27,25 @@ Nothing of Mojang's is in the APK.
 
 ## Controls
 
-Over a screen a finger is the mouse: a tap clicks, a drag drags, a long
-press is a right click and two fingers scroll.
+Touch works as in Zalith Launcher 2, with its control layouts
+(`crates/horizon-client/src/controls.rs`). The default layout is Zalith's:
+GUI shows and hides the others, Esc, F3, F5, Tab, T and IME along the top,
+E above the hotbar, PRI and SEC (left and right click, which also let the
+finger look around), sneak as a toggle, jump, Ctrl and Alt, and the
+joystick, which locks forward and sprints when pushed past its top.
 
-In the world:
+- In the world a finger on no control looks around. On the hotbar a tap
+  selects a slot, a double tap swaps hands and a long press drops.
+- Over a screen a finger moves the mouse pointer like a touchpad: a tap
+  clicks where it points and a long press holds the button.
+- The back gesture does what Escape does. The soft keyboard opens with chat,
+  signs, books and the other text fields, or with the IME button.
 
-| Touch | Does |
-|---|---|
-| A thumb on the left | The stick appears under it: move. Pushed fully forward, sprint |
-| A finger anywhere else | Look |
-| Tap | Attack what the crosshair is on, else use the hand |
-| Hold | Break, or use food, a bow or a spyglass while held |
-| Jump, Sneak | Jump (twice to fly), sneak on and off |
-| Items, Drop, Chat | E, Q and T |
-| View, Pause | F5, and what Escape does |
-| The hotbar | Select a slot |
-
-The back gesture does what Escape does. The soft keyboard opens with chat,
-signs, books and the other text fields. Settings turns the touch controls
-off for a keyboard or a controller.
+Layouts exported from Zalith Launcher 2 load as they are. Copy their `.json`
+files to `Android/data/com.lukagejak.horizon/files/controls` and press
+Import in Settings, then pick one with Next. Export writes the current
+layout there for Zalith or another phone. Settings also turns the touch
+controls off for a keyboard or a controller.
 
 ## How it is built
 
