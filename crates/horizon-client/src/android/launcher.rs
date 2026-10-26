@@ -49,6 +49,9 @@ pub struct Launcher {
     crash: Option<String>,
     /// The display cutout's margins in pixels, asked again when the window changes.
     insets: Option<[f32; 4]>,
+    /// Where Minecraft is, and when that was last looked at: finding it
+    /// hashes the client jar, too slow for every frame.
+    minecraft: Option<(Option<std::path::PathBuf>, Instant)>,
     /// Set by Play: the arguments the game starts with.
     pub play: Option<Vec<String>>,
 }
@@ -86,6 +89,7 @@ impl Launcher {
             started: Instant::now(),
             crash,
             insets: None,
+            minecraft: None,
             play: None,
         };
         // The app's own files first, so the version folder is there to read.
@@ -236,6 +240,7 @@ impl Launcher {
                 self.error = Some(e);
             }
             self.task = None;
+            self.minecraft = None;
         }
         if let Some(sign_in) = &self.sign_in {
             match sign_in.state() {
@@ -412,7 +417,7 @@ impl Launcher {
         y += ROW;
         // 02 the game files.
         let row = Rect::new(r.x, y, r.w, ROW);
-        let detail = match install::minecraft(&self.paths) {
+        let detail = match self.minecraft() {
             Some(dir) if dir == self.paths.copied_minecraft() => "From the Minecraft folder you copied to this phone.".to_owned(),
             Some(_) => "Downloaded from Mojang for your account.".to_owned(),
             None => format!(
@@ -441,6 +446,17 @@ impl Launcher {
         y += ROW;
         y = self.task_and_error(ui, r, y + 12.0);
         y - self.scroll
+    }
+
+    /// The Minecraft folder, looked for again every few seconds and after a task.
+    fn minecraft(&mut self) -> Option<std::path::PathBuf> {
+        let stale = self.minecraft.as_ref().is_none_or(|(_, at)| {
+            at.elapsed() > std::time::Duration::from_secs(5)
+        });
+        if stale && !self.busy() {
+            self.minecraft = Some((install::minecraft(&self.paths), Instant::now()));
+        }
+        self.minecraft.as_ref().and_then(|(dir, _)| dir.clone())
     }
 
     fn prepare(&mut self) {
