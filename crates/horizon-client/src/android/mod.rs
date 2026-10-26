@@ -78,6 +78,8 @@ pub fn main(app: AndroidApp) {
     }
     horizon_client::logging::flush();
     // A finished activity's process may host the next one, which needs a new
-    // event loop: winit makes only one per process.
-    std::process::exit(0);
+    // event loop: winit makes only one per process. `_exit` skips the C++
+    // exit handlers, which the activity's UI threads still running crash in.
+    // SAFETY: the game saved and the log is flushed; nothing is left to run.
+    unsafe { libc::_exit(0) }
 }
