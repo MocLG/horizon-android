@@ -79,9 +79,10 @@ pub(crate) const RADIUS_PLATE: f32 = horizon_theme::RADIUS_PLATE;
 pub(crate) enum Face {
     Regular,
     Medium,
+    SemiBold,
 }
 struct Fonts {
-    faces: [FontRef<'static>; 2],
+    faces: [FontRef<'static>; 3],
 }
 impl Fonts {
     fn load() -> Self {
@@ -90,6 +91,7 @@ impl Fonts {
             faces: [
                 f(horizon_theme::fonts::GEIST_REGULAR),
                 f(horizon_theme::fonts::GEIST_MEDIUM),
+                f(horizon_theme::fonts::GEIST_SEMIBOLD),
             ],
         }
     }
@@ -391,6 +393,68 @@ impl<'a> Ui<'a> {
         self.raw_fill(x0, y0 + r, x0 + r, y1 - r, color);
         self.raw_fill(x1 - r, y0 + r, x1, y1 - r, color);
         self.corners(x0, y0, x1, y1, r, false, color);
+    }
+    /// A filled rectangle in physical pixels whose corners each have their
+    /// own radius: top left, top right, bottom right, bottom left.
+    pub(crate) fn rounded_px(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, radii: [f32; 4], color: u32) {
+        if color >> 24 == 0 || x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let half = ((x1 - x0) / 2.0).min((y1 - y0) / 2.0).floor();
+        let [tl, tr, br, bl] = radii.map(|r| r.round().clamp(0.0, half.max(0.0)));
+        let top = tl.max(tr);
+        let bottom = bl.max(br);
+        self.raw_fill(x0, y0 + top, x1, y1 - bottom, color);
+        self.raw_fill(x0 + tl, y0, x1 - tr, y0 + top, color);
+        self.raw_fill(x0, y0 + tl, x0 + tl, y0 + top, color);
+        self.raw_fill(x1 - tr, y0 + tr, x1, y0 + top, color);
+        self.raw_fill(x0 + bl, y1 - bottom, x1 - br, y1, color);
+        self.raw_fill(x0, y1 - bottom, x0 + bl, y1 - bl, color);
+        self.raw_fill(x1 - br, y1 - bottom, x1, y1 - br, color);
+        self.corner_at(x0, y0, tl, (false, false), false, color);
+        self.corner_at(x1 - tr, y0, tr, (true, false), false, color);
+        self.corner_at(x1 - br, y1 - br, br, (true, true), false, color);
+        self.corner_at(x0, y1 - bl, bl, (false, true), false, color);
+    }
+    /// A border `width` physical pixels wide, inside the edge of `rounded_px`'s shape.
+    pub(crate) fn border_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        radii: [f32; 4],
+        width: f32,
+        color: u32,
+    ) {
+        if color >> 24 == 0 || width < 1.0 || x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let half = ((x1 - x0) / 2.0).min((y1 - y0) / 2.0).floor();
+        let [tl, tr, br, bl] = radii.map(|r| r.round().clamp(0.0, half.max(0.0)));
+        let w = width.round().min(half);
+        self.raw_fill(x0 + tl, y0, x1 - tr, y0 + w, color);
+        self.raw_fill(x0 + bl, y1 - w, x1 - br, y1, color);
+        self.raw_fill(x0, y0 + tl, x0 + w, y1 - bl, color);
+        self.raw_fill(x1 - w, y0 + tr, x1, y1 - br, color);
+        // Concentric one-pixel rings make a corner of any width.
+        for i in 0..w as u32 {
+            let i = i as f32;
+            let ring = |r: f32| (r - i).max(0.0);
+            self.corner_at(x0 + i, y0 + i, ring(tl), (false, false), true, color);
+            self.corner_at(x1 - tr, y0 + i, ring(tr), (true, false), true, color);
+            self.corner_at(x1 - br, y1 - br, ring(br), (true, true), true, color);
+            self.corner_at(x0 + i, y1 - bl, ring(bl), (false, true), true, color);
+        }
+    }
+    fn corner_at(&mut self, x: f32, y: f32, r: f32, flip: (bool, bool), ring: bool, color: u32) {
+        if r < 1.0 {
+            return;
+        }
+        let atlas = self.atlas;
+        if let Some(rect) = with_cache(atlas, |c| c.corner(atlas, r as u16, ring)) {
+            self.corner_quad(rect, x, y, r, flip, color);
+        }
     }
     /// A 1px rounded border.
     pub(crate) fn border(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) {
