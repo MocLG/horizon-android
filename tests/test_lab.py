@@ -181,6 +181,9 @@ class PublicationTests(unittest.TestCase):
             self.assertFalse(check_public_tree.prohibited(path), path)
         for path in ["tools/Minecraft.java", "tests/java/Client.java", ".local/tools/JfrSummary.java"]:
             self.assertTrue(check_public_tree.prohibited(path), path)
+        self.assertFalse(check_public_tree.prohibited(
+            "android/app/src/main/java/com/lukagejak/horizon/HorizonActivity.java"))
+        self.assertTrue(check_public_tree.prohibited("android/app/libs/minecraft.jar"))
 
     def test_force_added_ignored_file_is_detected_in_index_and_history(self):
         with tempfile.TemporaryDirectory() as temp:
