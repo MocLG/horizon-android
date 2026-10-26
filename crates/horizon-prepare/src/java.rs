@@ -235,6 +235,12 @@ fn find_tools(major: i64, more: &[PathBuf], compiler: bool) -> Result<Jdk, Strin
          Install it, or set JAVA_HOME to it, and try again."
     );
     let mut candidates = Vec::new();
+    // A `java` program to use as it is: the Android app's own, since a runtime's
+    // bin/java cannot start from an app's data there (android/java-launcher).
+    if let Some(java) = std::env::var_os("HORIZON_JAVA").filter(|j| !j.is_empty()) {
+        let java = PathBuf::from(java);
+        candidates.push((java.with_file_name("javac"), java, "HORIZON_JAVA"));
+    }
     if let Some(home) = std::env::var_os("JAVA_HOME").filter(|h| !h.is_empty()) {
         let bin = Path::new(&home).join("bin");
         candidates.push((
