@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/Minecraft-Java%2026.3-5D9C3F" alt="Minecraft Java 26.3">
   <img src="https://img.shields.io/badge/Rust-stable-B7410E?logo=rust&logoColor=white" alt="Rust">
   <img src="https://img.shields.io/badge/vanilla%20parity-100%25-F0795A" alt="Vanilla parity 100%">
-  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-2A2470" alt="Linux, macOS and Windows">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android-2A2470" alt="Linux, macOS, Windows and Android">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3B2F7E" alt="MIT license"></a>
 </p>
 
@@ -26,6 +26,19 @@
 Horizon is Minecraft: Java Edition 26.3 rewritten in Rust: a native game that reads the same worlds, follows the same rules and generates the same terrain as the Java game, and is checked against it by 281 differential harnesses. You play it through a small launcher, on the files from your own copy of Minecraft. It is free, open source and unofficial.
 
 > Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft. Horizon contains no Minecraft code, assets or data: you need your own legally obtained copy of Minecraft: Java Edition 26.3.
+
+## Android
+
+This repository is the Android port of Horizon: the same Rust game, built for Android, behind a launcher that looks like the desktop one. It runs on an arm64 phone or tablet with Vulkan and Android 10 or newer.
+
+1. Download the APK from [the latest release](https://github.com/MocLG/horizon-android/releases/latest) and install it.
+2. Get Minecraft 26.3 onto the phone. Signing in with the Microsoft account that owns Minecraft: Java Edition lets the launcher download it, once Mojang has approved the app's sign in. Until then, copy a Minecraft folder with 26.3 (`versions/26.3`, `libraries` and `assets`) to `Android/data/com.lukagejak.horizon/files/minecraft` over USB.
+3. Press Install. The launcher prepares the resources once, on the phone, with a Java runtime it carries. It takes a few minutes, so keep the app on screen while it runs.
+4. Press Play.
+
+The touch controls work like Zalith Launcher 2's and read and write its layouts, so a layout exported there imports here. The H ball over the game opens the game menu, with the layout editor, gestures, the gyroscope and the keyboard. Gamepads work too. New releases show up in the launcher as Update.
+
+How to build it and how the port works: [docs/android.md](docs/android.md).
 
 ## Download
 
