@@ -1,6 +1,7 @@
 package com.lukagejak.horizon;
 
 import android.app.ActivityManager;
+import android.app.GameManager;
 import android.app.NativeActivity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -189,10 +190,38 @@ public class HorizonActivity extends NativeActivity {
             case "install_update":
                 runOnUiThread(this::installUpdate);
                 return null;
+            case "sustained_performance":
+                boolean sustained = arg.equals("1");
+                runOnUiThread(() -> getWindow().setSustainedPerformanceMode(sustained));
+                return null;
+            case "game_mode":
+                return gameMode();
             case "model":
                 return Build.MANUFACTURER + " " + Build.MODEL + " (Android " + Build.VERSION.RELEASE + ")";
             default:
                 return null;
+        }
+    }
+
+    private String gameMode() {
+        if (Build.VERSION.SDK_INT < 31) {
+            return "unsupported";
+        }
+        GameManager manager = getSystemService(GameManager.class);
+        if (manager == null) {
+            return "unsupported";
+        }
+        switch (manager.getGameMode()) {
+            case GameManager.GAME_MODE_PERFORMANCE:
+                return "performance";
+            case GameManager.GAME_MODE_BATTERY:
+                return "battery";
+            case GameManager.GAME_MODE_STANDARD:
+                return "standard";
+            case GameManager.GAME_MODE_CUSTOM:
+                return "custom";
+            default:
+                return "unsupported";
         }
     }
 

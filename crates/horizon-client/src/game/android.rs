@@ -196,7 +196,13 @@ impl AndroidGame {
     /// The game with `args` (`--resources`, `--session-file`), at its loading screen.
     pub(crate) fn start(args: Vec<String>) -> Result<Self> {
         let options = Options::from_args(args.into_iter())?.ok_or("no options")?;
-        horizon_threads::put_helpers_behind();
+        let home = std::env::current_dir()?;
+        if flag(&home, "workerPriority", true) {
+            horizon_threads::put_helpers_behind();
+        }
+        if flag(&home, "sustainedPerformance", false) {
+            jni::platform("sustained_performance", "1");
+        }
         horizon_threads::favour_current();
         horizon_client::heartbeat::start();
         let started = Instant::now();
@@ -389,6 +395,9 @@ impl AndroidGame {
         if with_overlay(|o| o.settings.gyroscope).unwrap_or(false) {
             jni::gyroscope(true);
         }
+        if flag(&self.home, "sustainedPerformance", false) {
+            jni::platform("sustained_performance", "1");
+        }
         if let Some(w) = self.window() {
             w.request_redraw();
         }
@@ -396,6 +405,9 @@ impl AndroidGame {
 
     /// The app left the screen and its window with it.
     pub(crate) fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        if flag(&self.home, "sustainedPerformance", false) {
+            jni::platform("sustained_performance", "0");
+        }
         self.ask_keyboard(false);
         jni::gyroscope(false);
         self.forced_keyboard = false;

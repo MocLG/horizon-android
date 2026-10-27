@@ -46,10 +46,21 @@ pub fn main(app: AndroidApp) {
     // SAFETY: as above.
     unsafe { std::env::set_var("HORIZON_HOME", &paths.home) };
     let _ = std::env::set_current_dir(&paths.home);
-    // A phone's first start: a nearer horizon than a desktop's default 12 chunks.
+    // A phone's first start: mobile-optimized defaults for smooth performance,
+    // cool thermals, and battery efficiency.
     let options = paths.home.join("options.txt");
     if !options.exists() {
-        let _ = std::fs::write(options, "renderDistance:8\nsimulationDistance:6\n");
+        let _ = std::fs::write(
+            &options,
+            "renderDistance:8\nsimulationDistance:6\nmaxFps:60\nclouds:fast\nmipmapLevels:2\nbiomeBlendRadius:1\nparticles:1\nentityDistanceScaling:0.75\n",
+        );
+    }
+    let hgraphics = paths.home.join("horizon-graphics.txt");
+    if !hgraphics.exists() {
+        let _ = std::fs::write(
+            &hgraphics,
+            "preset:balanced\nuploadBudgetKiB:2048\nentityCulling:true\n",
+        );
     }
     horizon_client::telemetry::mark_start();
     horizon_client::logging::init(&paths.home, "Render thread");

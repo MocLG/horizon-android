@@ -8,11 +8,14 @@ use super::controls;
 use super::ui::{CONTROL, GUTTER, Pointer, ROW, Ui};
 use super::update::{self, Release};
 use crate::account;
+use horizon_client::graphics::{self, GraphicsApi, Preset};
+use horizon_client::settings::Settings;
+use horizon_client::ui_theme::preference;
 use horizon_theme::DARK as P;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::event::{TouchPhase, WindowEvent};
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::platform::android::activity::AndroidApp;
 use winit::window::Window;
 
@@ -45,6 +48,11 @@ pub struct Launcher {
     editing: Option<Editing>,
     /// The touch controls, kept in the game's horizon.txt.
     touch: bool,
+    /// The game settings the next start reads.
+    settings: Settings,
+    worker_priority: bool,
+    sustained: bool,
+    game_mode: String,
     started: Instant,
     /// The game's last crash, from its crash-reports folder.
     crash: Option<String>,
@@ -72,8 +80,20 @@ fn insets() -> [f32; 4] {
 
 impl Launcher {
     pub fn new(app: AndroidApp, paths: Paths, crash: Option<String>) -> Self {
-        let touch = horizon_client::ui_theme::preference(&paths.home, "touchControls")
-            .is_none_or(|v| v != "false");
+        let touch = preference(&paths.home, "touchControls").is_none_or(|v| v != "false");
+        let worker_priority =
+            preference(&paths.home, "workerPriority").is_none_or(|v| v != "false");
+        let mut sustained =
+            preference(&paths.home, "sustainedPerformance").is_some_and(|v| v == "true");
+        let mut settings = Settings::load(&paths.home.join("options.txt"));
+        let game_mode = jni::platform("game_mode", "").unwrap_or_else(|| "unsupported".into());
+        // Adapt to Android GameManager mode if active
+        if game_mode == "battery" && !settings.horizon.battery {
+            settings.horizon.battery = true;
+            settings.max_fps = settings.max_fps.min(60);
+        } else if game_mode == "performance" && !sustained {
+            sustained = true;
+        }
         let mut launcher = Self {
             app,
             paths,
@@ -89,6 +109,10 @@ impl Launcher {
             accounts: account::Accounts::load(),
             editing: None,
             touch,
+            settings,
+            worker_priority,
+            sustained,
+            game_mode,
             started: Instant::now(),
             crash,
             insets: None,
@@ -150,6 +174,12 @@ impl Launcher {
         self.window.take()
     }
 
+    pub fn request_redraw(&self) {
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     pub fn window_event(&mut self, event: WindowEvent) {
         let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
         match event {
@@ -158,11 +188,15 @@ impl Launcher {
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height, scale);
                 }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let (Some(r), Some(w)) = (&mut self.renderer, &self.window) {
                     let size = w.inner_size();
                     r.resize(size.width, size.height, scale_factor as f32);
+                    w.request_redraw();
                 }
             }
             WindowEvent::Touch(touch) => {
@@ -176,6 +210,9 @@ impl Launcher {
                     TouchPhase::Ended => self.pointer.release(),
                     TouchPhase::Cancelled => self.pointer.cancel(),
                 }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             WindowEvent::RedrawRequested => self.draw(),
             _ => {}
@@ -188,8 +225,11 @@ impl Launcher {
     }
 
     /// Keyboard text for the field being edited, and the back gesture.
-    fn typed(&mut self) {
+    fn typed(&mut self) -> bool {
         let typed = jni::take_typed();
+        if typed.is_empty() {
+            return false;
+        }
         if typed.contains(&jni::Typed::Back) {
             if let Some(s) = self.sign_in.take() {
                 s.cancel();
@@ -199,10 +239,10 @@ impl Launcher {
                 self.page = Page::Play;
                 self.scroll = 0.0;
             }
-            return;
+            return true;
         }
         let Some(editing) = &mut self.editing else {
-            return;
+            return false;
         };
         for t in typed {
             match t {
@@ -216,10 +256,11 @@ impl Launcher {
                     self.save_client_id(&id);
                     self.editing = None;
                     jni::show_keyboard(false);
-                    return;
+                    return true;
                 }
             }
         }
+        true
     }
 
     fn save_client_id(&mut self, id: &str) {
@@ -235,18 +276,20 @@ impl Launcher {
         }
     }
 
-    pub fn about_to_wait(&mut self) {
-        self.typed();
-        if let Some(task) = &self.task
-            && let Some(done) = task.progress().done
-        {
-            if let Err(e) = done {
-                self.error = Some(e);
+    pub fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let mut dirty = self.typed();
+        if let Some(task) = &self.task {
+            dirty = true;
+            if let Some(done) = task.progress().done {
+                if let Err(e) = done {
+                    self.error = Some(e);
+                }
+                self.task = None;
+                self.minecraft = None;
             }
-            self.task = None;
-            self.minecraft = None;
         }
         if let Some(sign_in) = &self.sign_in {
+            dirty = true;
             match sign_in.state() {
                 account::SignInState::Code(code) if !self.opened_code => {
                     self.opened_code = true;
@@ -265,8 +308,21 @@ impl Launcher {
                 _ => {}
             }
         }
-        if let Some(w) = &self.window {
-            w.request_redraw();
+        let busy = self.busy() || self.sign_in.is_some();
+        if busy {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(33),
+            ));
+        } else {
+            if dirty {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 
@@ -373,6 +429,8 @@ impl Launcher {
         let play = Rect::new(r.right() - 148.0, y + 4.0, 148.0, 44.0);
         let ready = self.paths.prepared() && !self.busy();
         if ui.button(play, "Play", true, ready) {
+            self.save_performance();
+            self.apply_android_hints();
             match install::game_args(&self.paths) {
                 Ok(args) => self.play = Some(args),
                 Err(e) => self.error = Some(e),
@@ -570,10 +628,52 @@ impl Launcher {
         }
     }
 
+    fn save_performance(&mut self) {
+        let _ = std::fs::write(
+            self.paths.home.join("options.txt"),
+            self.settings.serialize(),
+        );
+        self.settings.horizon.save(&self.paths.home);
+        set_preference(
+            &self.paths.home,
+            "workerPriority",
+            if self.worker_priority {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        set_preference(
+            &self.paths.home,
+            "sustainedPerformance",
+            if self.sustained { "true" } else { "false" },
+        );
+    }
+
+    fn apply_android_hints(&mut self) {
+        jni::platform(
+            "sustained_performance",
+            if self.sustained { "1" } else { "0" },
+        );
+        self.game_mode = jni::platform("game_mode", "").unwrap_or_else(|| "unsupported".into());
+        if self.game_mode == "battery" && !self.settings.horizon.battery {
+            self.settings.horizon.battery = true;
+            self.settings.max_fps = self.settings.max_fps.min(60);
+            self.save_performance();
+        }
+    }
+
     fn settings_page(&mut self, ui: &mut Ui, r: Rect, mut y: f32) -> f32 {
         ui.text(r.x, y, "Settings", Face::Medium, 44.0, hex(P.ink, 1.0));
         y += ui.c.line(Face::Medium, 44.0) + 4.0;
-        ui.text(r.x, y, "Your account, the controls and the game's files.", Face::Regular, 14.0, hex(P.muted, 1.0));
+        ui.text(
+            r.x,
+            y,
+            "Your account, the controls and the game's files.",
+            Face::Regular,
+            14.0,
+            hex(P.muted, 1.0),
+        );
         y += 34.0;
         ui.c.rule(r.x, y, r.w, hex(P.rule, 1.0));
         let mut index = 0;
@@ -681,6 +781,274 @@ impl Launcher {
                 Ok(file) => format!("Exported to {}.", file.display()),
                 Err(e) => e,
             });
+        }
+
+        let (row, i) = next(&mut y);
+        let preset = self.settings.horizon.preset;
+        let control = ui.button_width("Performance");
+        ui.row(
+            row,
+            i,
+            "Graphics preset",
+            "Sets distance, clouds, particles, shadows and mipmaps together.",
+            control,
+        );
+        if ui.row_button(row, preset.label(), false, true) {
+            let preset = match self.settings.horizon.preset {
+                Preset::Performance => Preset::Balanced,
+                Preset::Balanced => Preset::Quality,
+                Preset::Quality => Preset::Ultra,
+                Preset::Ultra => Preset::Performance,
+                Preset::Custom => Preset::Performance,
+            };
+            graphics::apply_preset(preset, &mut self.settings);
+            self.settings.horizon.preset = preset;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        let scales = [50, 60, 70, 80, 90, 100];
+        let scale = self.settings.horizon.resolution_scale;
+        let control = ui.button_width("100%");
+        ui.row(
+            row,
+            i,
+            "Resolution scale",
+            "World pixels per screen pixel; below 100% is faster on the GPU.",
+            control,
+        );
+        if ui.row_button(
+            row,
+            &format!("{}%", scale),
+            false,
+            true,
+        ) {
+            let next = scales
+                .into_iter()
+                .find(|s| *s > scale)
+                .unwrap_or(scales[0]);
+            self.settings.horizon.resolution_scale = next;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        let framerates = [30, 45, 60, 90, 120, 144, 165, 260];
+        let fps = self.settings.max_fps;
+        let control = ui.button_width("Unlimited");
+        ui.row(
+            row,
+            i,
+            "Maximum FPS",
+            "A cap saves power and heat; unlimited is 260.",
+            control,
+        );
+        if ui.row_button(row, &format!("{} FPS", fps), false, true) {
+            let next = framerates
+                .into_iter()
+                .find(|f| *f > fps)
+                .unwrap_or(framerates[0]);
+            self.settings.max_fps = next;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        ui.row(
+            row,
+            i,
+            "VSync",
+            "Waits for the display: no tearing, a little more latency.",
+            40.0,
+        );
+        if let Some(on) = ui.switch(row, self.settings.vsync) {
+            self.settings.vsync = on;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        let distances = [4, 6, 8, 10, 12, 16, 24, 32];
+        let rd = self.settings.render_distance;
+        let control = ui.button_width("32 chunks");
+        ui.row(
+            row,
+            i,
+            "Render distance",
+            "Full-detail terrain around you, in chunks.",
+            control,
+        );
+        if ui.row_button(row, &format!("{} chunks", rd), false, true) {
+            let next = distances
+                .into_iter()
+                .find(|d| *d > rd)
+                .unwrap_or(distances[0]);
+            self.settings.render_distance = next;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        let distances = [5, 6, 8, 10, 12, 16, 24, 32];
+        let sim = self.settings.simulation_distance;
+        let control = ui.button_width("32 chunks");
+        ui.row(
+            row,
+            i,
+            "Simulation distance",
+            "How far blocks, mobs and random ticks update, in chunks.",
+            control,
+        );
+        if ui.row_button(row, &format!("{} chunks", sim), false, true) {
+            let next = distances
+                .into_iter()
+                .find(|d| *d > sim)
+                .unwrap_or(distances[0]);
+            self.settings.simulation_distance = next;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        let workers = [1, 2, 3, 4, 6, 8];
+        let value = if self.settings.horizon.workers == 0 {
+            format!("Auto ({})", self.settings.horizon.worker_threads())
+        } else {
+            self.settings.horizon.workers.to_string()
+        };
+        let control = ui.button_width("Auto (00)");
+        ui.row(
+            row,
+            i,
+            "Worker threads",
+            "Chunk generation, light and meshing. Auto is every core but one; fewer leave headroom.",
+            control,
+        );
+        if ui.row_button(row, &value, false, true) {
+            let next = workers
+                .into_iter()
+                .find(|t| *t > self.settings.horizon.workers)
+                .unwrap_or(workers[0]);
+            self.settings.horizon.workers = next;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        ui.row(
+            row,
+            i,
+            "Worker priority",
+            "Chunk workers run ten nice levels below the render and server threads.",
+            40.0,
+        );
+        if let Some(on) = ui.switch(row, self.worker_priority) {
+            self.worker_priority = on;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        let budgets = [0, 256, 512, 1024, 2048, 4096, 8192, 16384];
+        let budget = self.settings.horizon.upload_budget_kib;
+        let value = match budget {
+            0 => "Unlimited".to_owned(),
+            n if n >= 1024 => format!("{} MiB", n / 1024),
+            n => format!("{n} KiB"),
+        };
+        let control = ui.button_width("16 MiB");
+        ui.row(
+            row,
+            i,
+            "Upload budget",
+            "Mesh data sent to the GPU each frame. Unlimited is fastest with headroom.",
+            control,
+        );
+        if ui.row_button(row, &value, false, true) {
+            let next = budgets
+                .into_iter()
+                .find(|b| *b > budget)
+                .unwrap_or(budgets[0]);
+            self.settings.horizon.upload_budget_kib = next;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        ui.row(
+            row,
+            i,
+            "Battery mode",
+            "Caps the game at 60 FPS (30 in menus) and halves the worker threads.",
+            40.0,
+        );
+        if let Some(on) = ui.switch(row, self.settings.horizon.battery) {
+            self.settings.horizon.battery = on;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        let api = match self.settings.horizon.api {
+            GraphicsApi::Auto | GraphicsApi::Vulkan | GraphicsApi::OpenGl => self.settings.horizon.api,
+            _ => GraphicsApi::Auto,
+        };
+        let control = ui.button_width("Vulkan");
+        ui.row(
+            row,
+            i,
+            "Graphics API",
+            "Vulkan is the fast path; OpenGL is for drivers without it.",
+            control,
+        );
+        if ui.row_button(row, api.label(), false, true) {
+            let next = match api {
+                GraphicsApi::Auto => GraphicsApi::Vulkan,
+                GraphicsApi::Vulkan => GraphicsApi::OpenGl,
+                GraphicsApi::OpenGl => GraphicsApi::Auto,
+                _ => GraphicsApi::Auto,
+            };
+            self.settings.horizon.api = next;
+            self.save_performance();
+        }
+
+        let (row, i) = next(&mut y);
+        ui.row(
+            row,
+            i,
+            "Sustained performance",
+            "Asks Android to hold clocks steady for long sessions instead of boosting.",
+            40.0,
+        );
+        if let Some(on) = ui.switch(row, self.sustained) {
+            self.sustained = on;
+            self.save_performance();
+            jni::platform("sustained_performance", if on { "1" } else { "0" });
+        }
+
+        if self.game_mode != "unsupported" {
+            let (row, i) = next(&mut y);
+            let mode = match self.game_mode.as_str() {
+                "performance" => "Performance",
+                "battery" => "Battery",
+                "standard" => "Standard",
+                "custom" => "Custom",
+                _ => "Not supported",
+            };
+            let control = ui.button_width("Refresh");
+            ui.row(
+                row,
+                i,
+                "Android game mode",
+                &format!(
+                    "Android reports {mode}. Chosen in the Game Dashboard; Horizon reads the hint."
+                ),
+                control,
+            );
+            if ui.row_button(row, "Refresh", false, true) {
+                self.game_mode =
+                    jni::platform("game_mode", "").unwrap_or_else(|| "unsupported".into());
+                if self.game_mode == "battery" && !self.settings.horizon.battery {
+                    self.settings.horizon.battery = true;
+                    self.settings.max_fps = self.settings.max_fps.min(60);
+                    self.save_performance();
+                } else if self.game_mode == "performance" && !self.sustained {
+                    self.sustained = true;
+                    self.save_performance();
+                    jni::platform("sustained_performance", "1");
+                }
+            }
         }
         // Where a Minecraft folder can be copied to.
         let (row, i) = next(&mut y);
