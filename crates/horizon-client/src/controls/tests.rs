@@ -29,7 +29,9 @@ fn keys(c: &mut Controls) -> Vec<(String, bool)> {
     c.take_events()
         .into_iter()
         .filter_map(|e| match e {
-            Event::Key { name, pressed } | Event::Launcher { name, pressed } => Some((name, pressed)),
+            Event::Key { name, pressed } | Event::Launcher { name, pressed } => {
+                Some((name, pressed))
+            }
             Event::SendText(_) => None,
         })
         .collect()
@@ -71,7 +73,10 @@ fn a_button_sends_its_key_down_and_up() {
     c.up(1, SCREEN);
     assert_eq!(
         keys(&mut c),
-        [("GLFW_KEY_E".to_owned(), true), ("GLFW_KEY_E".to_owned(), false)]
+        [
+            ("GLFW_KEY_E".to_owned(), true),
+            ("GLFW_KEY_E".to_owned(), false)
+        ]
     );
 }
 
@@ -102,7 +107,11 @@ fn the_gui_button_switches_the_other_layers() {
     let gui = centre_of(&c, "GUI");
     c.down(1, gui, true, SCREEN);
     c.up(1, SCREEN);
-    assert_eq!(c.down(2, e, true, SCREEN), Claim::None, "the E button's layer is hidden");
+    assert_eq!(
+        c.down(2, e, true, SCREEN),
+        Claim::None,
+        "the E button's layer is hidden"
+    );
     c.down(3, gui, true, SCREEN);
     c.up(3, SCREEN);
     assert_eq!(c.down(4, e, true, SCREEN), Claim::Taken);
@@ -123,7 +132,10 @@ fn the_joystick_walks_eight_ways_and_locks_forward() {
     let r = c.stick_rect((l, i), SCREEN);
     let centre = (r.x + r.w / 2.0, r.y + r.h / 2.0);
     assert_eq!(c.down(1, centre, true, SCREEN), Claim::Taken);
-    assert!(keys(&mut c).is_empty(), "a drag stick waits for the finger to move");
+    assert!(
+        keys(&mut c).is_empty(),
+        "a drag stick waits for the finger to move"
+    );
     c.moved(1, (centre.0, r.y + 2.0), true, SCREEN);
     assert_eq!(keys(&mut c), [("GLFW_KEY_W".to_owned(), true)]);
     c.moved(1, (r.x + r.w - 2.0, centre.1 - r.h * 0.4), true, SCREEN);
@@ -138,7 +150,10 @@ fn the_joystick_walks_eight_ways_and_locks_forward() {
     // Past the top edge: forward, and the lock (sprint) on letting go.
     c.moved(1, (centre.0, r.y - r.h), true, SCREEN);
     let events = keys(&mut c);
-    assert!(events.contains(&("GLFW_KEY_LEFT_CONTROL".to_owned(), true)), "{events:?}");
+    assert!(
+        events.contains(&("GLFW_KEY_LEFT_CONTROL".to_owned(), true)),
+        "{events:?}"
+    );
     c.up(1, SCREEN);
     assert!(c.sticks[l][i].locked);
     assert!(!keys(&mut c).contains(&("GLFW_KEY_W".to_owned(), false)));
@@ -160,7 +175,9 @@ fn the_editor_adds_and_moves_a_button() {
     let mut e = Editor::new(Controls::default_layout());
     let hud = |e: &mut Editor| {
         // Drawing lays out the toolbar and panel the taps land on.
-        let atlas = crate::hud::HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets")).unwrap();
+        let atlas =
+            crate::hud::HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets"))
+                .unwrap();
         let mut batch = HudBatch::new([SCREEN.width as u32, SCREEN.height as u32]);
         e.draw(&mut batch, &atlas, SCREEN);
     };
@@ -179,6 +196,16 @@ fn the_editor_adds_and_moves_a_button() {
     e.moved(1, (from.0 - 5000.0, from.1), SCREEN);
     assert_eq!(e.up(1, (from.0 - 5000.0, from.1), SCREEN), Outcome::None);
     assert_eq!(e.layout().layers[l].normal_buttons[i].position.x, 0);
+    // The handle on its corner resizes it.
+    hud(&mut e);
+    let r = e.controls.button_rect((l, i), SCREEN);
+    let corner = (r.x + r.w, r.y + r.h);
+    e.down(2, corner, SCREEN);
+    e.moved(2, (corner.0 + 100.0, corner.1 + 50.0), SCREEN);
+    e.up(2, (corner.0 + 100.0, corner.1 + 50.0), SCREEN);
+    let grown = e.controls.button_rect((l, i), SCREEN);
+    assert!((grown.w - r.w - 100.0).abs() < 3.0, "{} to {}", r.w, grown.w);
+    assert!((grown.h - r.h - 50.0).abs() < 3.0, "{} to {}", r.h, grown.h);
     let saved = e.layout().to_json();
     let layout = Layout::parse(&saved).unwrap();
     assert_eq!(layout.layers[l].normal_buttons.len(), before + 1);
@@ -211,9 +238,14 @@ fn auto_size_keeps_the_default_and_shrinks_a_crowded_layout() {
 fn older_layouts_are_updated_as_zalith_updates_them() {
     let mut json: serde_json::Value = serde_json::from_str(DEFAULT_LAYOUT).unwrap();
     json["editorVersion"] = 1.into();
-    let x = json["layers"][1]["normalButtons"][1]["position"]["x"].as_i64().unwrap();
+    let x = json["layers"][1]["normalButtons"][1]["position"]["x"]
+        .as_i64()
+        .unwrap();
     json["layers"][1]["normalButtons"][1]["position"]["x"] = (x / 10).into();
     let layout = Layout::parse(&json.to_string()).unwrap();
-    assert_eq!(i64::from(layout.layers[1].normal_buttons[1].position.x), x / 10 * 10);
+    assert_eq!(
+        i64::from(layout.layers[1].normal_buttons[1].position.x),
+        x / 10 * 10
+    );
     assert!(layout.styles.iter().all(|s| !s.common_style));
 }
