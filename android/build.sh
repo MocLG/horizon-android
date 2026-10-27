@@ -4,6 +4,7 @@
 #
 #   android/build.sh            release APK in android/build/
 #   HORIZON_ANDROID_PROFILE=android  the game without LTO, quicker to build
+#   android/release.sh          then publishes it for the app's updater
 #   HORIZON_ANDROID_KEYSTORE=... signs it with your key (else the debug key)
 #
 # Needs Rust with the aarch64-linux-android target, clang and lld, the
@@ -99,9 +100,13 @@ if [ "$(uname -m)" != x86_64 ]; then
     aapt2=("-Pandroid.aapt2FromMavenOverride=$here/tools/aapt2")
 fi
 echo "sdk.dir=$ANDROID_HOME" > local.properties
+code=$(date -u +%s | cut -c1-9)
 ./gradlew --no-daemon -q :app:assembleRelease "${aapt2[@]}" \
     -PhorizonVersionName="$version" \
-    -PhorizonVersionCode="$(date -u +%s | cut -c1-9)"
+    -PhorizonVersionCode="$code"
 apk="$build/horizon-$version-android-arm64.apk"
 cp app/build/outputs/apk/release/app-release.apk "$apk"
+# For android/release.sh: the tag the updater compares.
+printf '%s\n' "$code" > "$build/version-code"
+printf '%s\n' "$HORIZON_ANDROID_BUILD" > "$build/version-name"
 echo "Built $apk"

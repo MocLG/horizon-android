@@ -9,6 +9,7 @@ mod launcher;
 mod logcat;
 mod shell;
 mod ui;
+mod update;
 
 use winit::event_loop::EventLoop;
 use winit::platform::android::EventLoopBuilderExtAndroid;

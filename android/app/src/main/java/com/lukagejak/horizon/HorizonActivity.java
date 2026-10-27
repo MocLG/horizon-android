@@ -179,6 +179,16 @@ public class HorizonActivity extends NativeActivity {
                         == android.content.res.Configuration.UI_MODE_NIGHT_YES ? "1" : "0";
             case "language":
                 return java.util.Locale.getDefault().toLanguageTag();
+            case "version_code":
+                try {
+                    return Long.toString(getPackageManager()
+                            .getPackageInfo(getPackageName(), 0).getLongVersionCode());
+                } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+                    return null;
+                }
+            case "install_update":
+                runOnUiThread(this::installUpdate);
+                return null;
             case "model":
                 return Build.MANUFACTURER + " " + Build.MODEL + " (Android " + Build.VERSION.RELEASE + ")";
             default:
@@ -251,6 +261,21 @@ public class HorizonActivity extends NativeActivity {
         }
         return cutout.getSafeInsetLeft() + "," + cutout.getSafeInsetTop() + ","
                 + cutout.getSafeInsetRight() + "," + cutout.getSafeInsetBottom();
+    }
+
+    /** Opens Android's installer on the downloaded update, or its setting to allow it first. */
+    private void installUpdate() {
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            Toast.makeText(this, "Allow Horizon to install apps, then press Update again",
+                    Toast.LENGTH_LONG).show();
+            startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName())));
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_VIEW)
+                .setDataAndType(ApkProvider.uri(), "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(intent);
     }
 
     private void keyboard(boolean show) {

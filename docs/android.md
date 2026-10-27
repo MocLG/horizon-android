@@ -98,9 +98,23 @@ it with your key, else Gradle's debug key signs it. `HORIZON_EXPORTERS`
 names a release's `exporters` folder to ship when it was built from the
 same sources.
 
+`HORIZON_ANDROID_PROFILE=android` builds the game without LTO, which
+links in a fraction of the time, and `HORIZON_ANDROID_JOBS` sets cargo's
+jobs: 4 by default, and 1 on a phone, where more run out of memory.
+
 `cargo check -p horizon-client --example horizon --target
 aarch64-linux-android --no-default-features --features audio,android`
 after sourcing `android/tools/env.sh` checks the Android code alone.
+
+## Updates
+
+`android/release.sh` publishes the APK the last build made as a GitHub
+release of MocLG/horizon-android, tagged `android-<versionCode>`. The
+launcher looks for the latest release at start, and when its version code
+is higher than its own it shows Update: the APK downloads into the app's
+cache folder and Android's installer opens on it. Android installs it only
+when the release key signed both builds, so publish only builds signed
+with it.
 
 ## Logs
 

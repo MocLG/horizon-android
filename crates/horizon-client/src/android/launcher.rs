@@ -6,9 +6,10 @@ use super::install::{self, Paths, Task};
 use super::jni;
 use super::controls;
 use super::ui::{CONTROL, GUTTER, Pointer, ROW, Ui};
+use super::update::{self, Release};
 use crate::account;
 use horizon_theme::DARK as P;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use winit::event::{TouchPhase, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -52,6 +53,8 @@ pub struct Launcher {
     /// Where Minecraft is, and when that was last looked at: finding it
     /// hashes the client jar, too slow for every frame.
     minecraft: Option<(Option<std::path::PathBuf>, Instant)>,
+    /// A newer release of the app, once the check at start found one.
+    update: Arc<Mutex<Option<Release>>>,
     /// Set by Play: the arguments the game starts with.
     pub play: Option<Vec<String>>,
 }
@@ -90,6 +93,7 @@ impl Launcher {
             crash,
             insets: None,
             minecraft: None,
+            update: update::check(),
             play: None,
         };
         // The app's own files first, so the version folder is there to read.
@@ -396,6 +400,22 @@ impl Launcher {
             ui.row(row, 0, "The game crashed last time", &crash, 90.0);
             if ui.row_button(row, "Dismiss", false, true) {
                 self.crash = None;
+            }
+            y += ROW;
+        }
+        let release = self.update.lock().unwrap().clone();
+        if let Some(release) = release {
+            let row = Rect::new(r.x, y, r.w, ROW);
+            let size = format!("{} MB", release.size >> 20);
+            ui.row(
+                row,
+                0,
+                &format!("{} is out", release.name),
+                &format!("A {size} download. Your worlds, settings and accounts stay."),
+                110.0,
+            );
+            if ui.row_button(row, "Update", true, !self.busy()) {
+                self.run("Updating", move |_, paths, log| update::install(&release, paths, log));
             }
             y += ROW;
         }
