@@ -9,9 +9,12 @@ description = "Horizon native development client"
 
 [dependencies]
 horizon-assets = { path = "../horizon-assets" }
+horizon-client-core = { path = "../horizon-client-core" }
+horizon-command = { path = "../horizon-command" }
 horizon-core = { path = "../horizon-core" }
 # The server thread ahead of the workers (MinecraftServer.spin's Thread.setPriority).
 horizon-threads = { path = "../horizon-threads" }
+horizon-hdr = { path = "../horizon-hdr" }
 horizon-world = { path = "../horizon-world" }
 horizon-protocol = { path = "../horizon-protocol" }
 # server.properties, eula.txt and the user lists, shared with horizon-server.
@@ -90,6 +93,8 @@ libc = "0.2"
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 getrandom = "0.3"
 dirs = "5"
+# The launcher's offline skins (launcher/src/skins.rs), which its accounts keep.
+image = { version = "0.25", default-features = false, features = ["png"] }
 horizon-prepare = { path = "../horizon-prepare" }
 
 [target.'cfg(windows)'.build-dependencies]

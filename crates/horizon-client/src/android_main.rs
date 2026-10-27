@@ -17,6 +17,17 @@ mod mojang;
 #[allow(dead_code)]
 #[path = "../../../launcher/src/sources.rs"]
 mod sources;
+#[allow(dead_code)]
+#[path = "../../../launcher/src/skins.rs"]
+mod skins;
+
+/// The desktop launcher's proxy setting lives in its own settings, which the
+/// Android launcher has none of: requests go direct.
+mod proxy {
+    pub fn agent(builder: ureq::AgentBuilder, _url: &str) -> ureq::AgentBuilder {
+        builder
+    }
+}
 use android::backend;
 
 #[allow(unsafe_code)]
