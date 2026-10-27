@@ -3,6 +3,7 @@
 # runtime and Horizon's version folder as assets, then the APK.
 #
 #   android/build.sh            release APK in android/build/
+#   HORIZON_ANDROID_PROFILE=android  the game without LTO, quicker to build
 #   HORIZON_ANDROID_KEYSTORE=... signs it with your key (else the debug key)
 #
 # Needs Rust with the aarch64-linux-android target, clang and lld, the
@@ -30,6 +31,7 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/crates/horizon-client/Cargo
 commit=$(git -C "$repo" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 export HORIZON_ANDROID_BUILD="${HORIZON_ANDROID_BUILD:-$version+$commit.$(date -u +%Y%m%d%H%M)}"
 jobs="${HORIZON_ANDROID_JOBS:-4}"
+profile="${HORIZON_ANDROID_PROFILE:-release}"
 # The Azure app players sign in through (public; Settings can override it).
 export HORIZON_MSA_CLIENT_ID="${HORIZON_MSA_CLIENT_ID:-5be5d759-7f2f-4790-be62-438977cdc7a5}"
 
@@ -40,10 +42,10 @@ strip=$(command -v llvm-strip || printf '%s\n' /usr/bin/llvm-strip-* | sort -V |
 
 echo "== The game ($HORIZON_ANDROID_BUILD)"
 cargo build --manifest-path "$repo/Cargo.toml" -p horizon-client --example horizon \
-    --target aarch64-linux-android --profile android -j "$jobs" \
+    --target aarch64-linux-android --profile "$profile" -j "$jobs" \
     --no-default-features --features audio,android
 "$strip" --strip-debug -o "$libs/libhorizon.so" \
-    "$repo/target/aarch64-linux-android/android/examples/libhorizon.so"
+    "$repo/target/aarch64-linux-android/$profile/examples/libhorizon.so"
 
 echo "== The java launcher"
 cargo build --manifest-path "$here/java-launcher/Cargo.toml" --release --target aarch64-linux-android

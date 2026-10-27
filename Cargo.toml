@@ -43,8 +43,9 @@ lto = false
 codegen-units = 16
 incremental = true
 
-# The Android app's library (android/build.sh): optimized like a release, with
-# the fast profile's quick link, and no debug info to strip from the APK.
+# The Android app's library while iterating (HORIZON_ANDROID_PROFILE=android
+# android/build.sh): the fast profile's quick link, no debug info. Releases
+# use the release profile.
 [profile.android]
 inherits = "release"
 lto = false
