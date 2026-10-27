@@ -890,8 +890,9 @@ fn in_rounded(r: Rect, radius: f32, p: (f32, f32)) -> bool {
         return false;
     }
     let radius = radius.min(r.w / 2.0).min(r.h / 2.0);
-    let cx = p.0.clamp(r.x + radius, r.x + r.w - radius);
-    let cy = p.1.clamp(r.y + radius, r.y + r.h - radius);
+    // Not clamp: a round widget's bounds can cross by a rounding error.
+    let cx = p.0.min(r.x + r.w - radius).max(r.x + radius);
+    let cy = p.1.min(r.y + r.h - radius).max(r.y + radius);
     (p.0 - cx).hypot(p.1 - cy) <= radius + 0.5
 }
 

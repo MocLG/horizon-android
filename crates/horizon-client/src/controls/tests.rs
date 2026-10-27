@@ -204,7 +204,12 @@ fn the_editor_adds_and_moves_a_button() {
     e.moved(2, (corner.0 + 100.0, corner.1 + 50.0), SCREEN);
     e.up(2, (corner.0 + 100.0, corner.1 + 50.0), SCREEN);
     let grown = e.controls.button_rect((l, i), SCREEN);
-    assert!((grown.w - r.w - 100.0).abs() < 3.0, "{} to {}", r.w, grown.w);
+    assert!(
+        (grown.w - r.w - 100.0).abs() < 3.0,
+        "{} to {}",
+        r.w,
+        grown.w
+    );
     assert!((grown.h - r.h - 50.0).abs() < 3.0, "{} to {}", r.h, grown.h);
     let saved = e.layout().to_json();
     let layout = Layout::parse(&saved).unwrap();
@@ -248,4 +253,17 @@ fn older_layouts_are_updated_as_zalith_updates_them() {
         x / 10 * 10
     );
     assert!(layout.styles.iter().all(|s| !s.common_style));
+}
+
+#[test]
+fn a_round_button_takes_a_touch() {
+    // A radius of half the width, where the bounds cross by a rounding error.
+    let r = Rect {
+        x: 0.1,
+        y: 0.0,
+        w: 500.05153,
+        h: 500.05153,
+    };
+    assert!(in_rounded(r, 250.02577, (250.0, 250.0)));
+    assert!(!in_rounded(r, 250.02577, (1.0, 1.0)));
 }
