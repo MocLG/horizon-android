@@ -462,8 +462,15 @@ impl Game<'_> {
         }
         let (left_lines, right_lines) = d.columns(&self.debug_chart_lines());
         let atlas = &self.gui.atlas;
-        let mut draws = vec![hud_layout::GuiDraw::Push(vec![hud_layout::PoseOp::Translate(left, top)])];
-        draws.extend(debug_overlay::draw(&atlas.font, [&left_lines, &right_lines], scale, width));
+        let mut draws = vec![hud_layout::GuiDraw::Push(vec![
+            hud_layout::PoseOp::Translate(left, top),
+        ])];
+        draws.extend(debug_overlay::draw(
+            &atlas.font,
+            [&left_lines, &right_lines],
+            scale,
+            width,
+        ));
         let charts = self.debug_charts.draw(
             &atlas.font,
             width,

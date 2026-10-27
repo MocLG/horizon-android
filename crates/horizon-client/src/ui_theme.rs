@@ -103,7 +103,11 @@ pub fn set_system_fonts(interface: Option<Vec<u8>>, fallbacks: Vec<Vec<u8>>) {
     };
     let _ = SYSTEM_FONTS.set((
         interface.and_then(usable),
-        fallbacks.into_iter().filter_map(usable).take(FALLBACKS.len()).collect(),
+        fallbacks
+            .into_iter()
+            .filter_map(usable)
+            .take(FALLBACKS.len())
+            .collect(),
     ));
 }
 
@@ -441,7 +445,15 @@ impl<'a> Ui<'a> {
     }
     /// A filled rectangle in physical pixels whose corners each have their
     /// own radius: top left, top right, bottom right, bottom left.
-    pub(crate) fn rounded_px(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, radii: [f32; 4], color: u32) {
+    pub(crate) fn rounded_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        radii: [f32; 4],
+        color: u32,
+    ) {
         if color >> 24 == 0 || x1 <= x0 || y1 <= y0 {
             return;
         }
@@ -577,7 +589,10 @@ impl<'a> Ui<'a> {
             for ch in text.chars() {
                 let (glyph_face, id) = c.fonts.resolve(face, ch);
                 let (advance, kern) = {
-                    let f = c.fonts.face(glyph_face).as_scaled(c.fonts.scale(glyph_face, px));
+                    let f = c
+                        .fonts
+                        .face(glyph_face)
+                        .as_scaled(c.fonts.scale(glyph_face, px));
                     let kern = match prev {
                         Some((pf, p)) if pf == glyph_face => f.kern(p, id),
                         _ => 0.0,

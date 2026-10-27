@@ -116,15 +116,29 @@ impl Menu {
     }
 
     pub fn holds(&self, finger: u64) -> bool {
-        self.on_ball.is_some_and(|(f, _, _)| f == finger) || self.pending.is_some_and(|(f, _)| f == finger)
+        self.on_ball.is_some_and(|(f, _, _)| f == finger)
+            || self.pending.is_some_and(|(f, _)| f == finger)
     }
 
-    pub fn draw(&mut self, batch: &mut HudBatch, atlas: &HudAtlas, screen: Screen, settings: Settings) {
+    pub fn draw(
+        &mut self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        screen: Screen,
+        settings: Settings,
+    ) {
         let mut ui = Ui::new(atlas, batch, (0.0, 0.0));
         self.hits.clear();
         let d = screen.density;
         let (x, y, r) = self.ball_disc(screen);
-        ui.rounded_px((x - r).round(), (y - r).round(), (x + r).round(), (y + r).round(), [r; 4], PLATE);
+        ui.rounded_px(
+            (x - r).round(),
+            (y - r).round(),
+            (x + r).round(),
+            (y + r).round(),
+            [r; 4],
+            PLATE,
+        );
         ui.border_px(
             (x - r).round(),
             (y - r).round(),
@@ -136,7 +150,12 @@ impl Menu {
         );
         widgets::centred(
             &mut ui,
-            Rect { x: x - r, y: y - r, w: 2.0 * r, h: 2.0 * r },
+            Rect {
+                x: x - r,
+                y: y - r,
+                w: 2.0 * r,
+                h: 2.0 * r,
+            },
             13.0,
             Face::SemiBold,
             TEXT,
@@ -148,9 +167,18 @@ impl Menu {
             let on = |v: bool| if v { "on" } else { "off" };
             let items = [
                 ("Edit controls".to_owned(), Choice::EditControls),
-                (format!("Gestures: {}", on(settings.gestures)), Choice::Gestures),
-                (format!("Gyroscope: {}", on(settings.gyroscope)), Choice::Gyroscope),
-                (format!("Controls opacity: {:.0}%", settings.opacity * 100.0), Choice::Opacity),
+                (
+                    format!("Gestures: {}", on(settings.gestures)),
+                    Choice::Gestures,
+                ),
+                (
+                    format!("Gyroscope: {}", on(settings.gyroscope)),
+                    Choice::Gyroscope,
+                ),
+                (
+                    format!("Controls opacity: {:.0}%", settings.opacity * 100.0),
+                    Choice::Opacity,
+                ),
                 (
                     match settings.size {
                         None => format!("Controls size: Auto ({:.0}%)", settings.fitted * 100.0),
@@ -161,7 +189,11 @@ impl Menu {
                 (
                     format!(
                         "Interface: {}",
-                        if settings.larger_interface { "larger than vanilla" } else { "vanilla" }
+                        if settings.larger_interface {
+                            "larger than vanilla"
+                        } else {
+                            "vanilla"
+                        }
                     ),
                     Choice::Interface,
                 ),
@@ -177,7 +209,12 @@ impl Menu {
                     Choice::DebugSize,
                 ),
                 (
-                    if settings.controls_hidden { "Show controls" } else { "Hide controls" }.to_owned(),
+                    if settings.controls_hidden {
+                        "Show controls"
+                    } else {
+                        "Hide controls"
+                    }
+                    .to_owned(),
                     Choice::HideControls,
                 ),
                 ("Keyboard".to_owned(), Choice::Keyboard),
@@ -193,7 +230,15 @@ impl Menu {
                 h,
             };
             widgets::plate(&mut ui, p, 14.0 * d, PLATE);
-            widgets::text(&mut ui, p.x + 18.0 * d, p.y + 14.0 * d, 15.0, Face::Medium, TEXT, "Horizon");
+            widgets::text(
+                &mut ui,
+                p.x + 18.0 * d,
+                p.y + 14.0 * d,
+                15.0,
+                Face::Medium,
+                TEXT,
+                "Horizon",
+            );
             widgets::text(
                 &mut ui,
                 p.x + 90.0 * d,
@@ -211,7 +256,14 @@ impl Menu {
                     w: column,
                     h: row - 6.0 * d,
                 };
-                widgets::button(&mut ui, &mut self.hits, b, &label, choice == Choice::EditControls, choice);
+                widgets::button(
+                    &mut ui,
+                    &mut self.hits,
+                    b,
+                    &label,
+                    choice == Choice::EditControls,
+                    choice,
+                );
             }
         }
         ui.finish();

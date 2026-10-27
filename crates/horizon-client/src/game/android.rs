@@ -14,7 +14,9 @@ use super::*;
 use crate::android::jni::{self, Typed};
 use horizon_client::controls::editor::{Editor, Outcome};
 use horizon_client::controls::menu::{Choice, Menu, Settings as TouchSettings};
-use horizon_client::controls::{self, Claim, Controls, Event as ControlEvent, Screen as ControlScreen};
+use horizon_client::controls::{
+    self, Claim, Controls, Event as ControlEvent, Screen as ControlScreen,
+};
 use horizon_client::gamepad::{Button as PadButton, PadState};
 use horizon_client::osk;
 use horizon_client::ui_theme::{preference, set_preference};
@@ -78,7 +80,8 @@ pub(crate) fn draw_touch(batch: &mut HudBatch, atlas: &horizon_client::hud::HudA
             return;
         }
         if !o.settings.controls_hidden {
-            o.controls.draw(batch, atlas, o.in_game, o.screen, o.settings.opacity);
+            o.controls
+                .draw(batch, atlas, o.in_game, o.screen, o.settings.opacity);
         }
         o.menu.draw(batch, atlas, o.screen, o.settings);
         if let Some(at) = o.pointer {
@@ -96,7 +99,10 @@ enum Role {
     /// A control, the menu or the editor has it.
     Control,
     /// Looking around in the world; `held` is the button a gesture's hold pressed.
-    Look { gestures: bool, held: Option<MouseButton> },
+    Look {
+        gestures: bool,
+        held: Option<MouseButton>,
+    },
     /// Moving the menu's pointer; `held` once a long press pressed the button.
     Pointer { move_only: bool, held: bool },
     /// On the hotbar, over `slot`.
@@ -213,7 +219,11 @@ impl AndroidGame {
         controls.language = jni::platform("language", "").unwrap_or_default();
         log::info!(
             "Horizon: touch controls {}, layout {:?}",
-            if enabled { "on" } else { "off (Settings, Touch controls)" },
+            if enabled {
+                "on"
+            } else {
+                "off (Settings, Touch controls)"
+            },
             controls.layout.info.name.default.trim()
         );
         let touch = TouchSettings {
@@ -317,7 +327,10 @@ impl AndroidGame {
 
     fn screen(&self) -> ControlScreen {
         let size = match &self.app {
-            App::Ready(game) => game.renderer.as_ref().map(|r| [r.config.width, r.config.height]),
+            App::Ready(game) => game
+                .renderer
+                .as_ref()
+                .map(|r| [r.config.width, r.config.height]),
             App::Loading(loading) => loading
                 .renderer
                 .as_ref()
@@ -391,7 +404,12 @@ impl AndroidGame {
         }
     }
 
-    pub(crate) fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+    pub(crate) fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: WindowId,
+        event: WindowEvent,
+    ) {
         match event {
             WindowEvent::Touch(finger) => {
                 with_overlay(|o| o.controls.gamepad = false);
@@ -405,7 +423,10 @@ impl AndroidGame {
                 }
             }
             WindowEvent::KeyboardInput { event: key, .. }
-                if matches!(key.physical_key, PhysicalKey::Unidentified(NativeKeyCode::Android(_))) =>
+                if matches!(
+                    key.physical_key,
+                    PhysicalKey::Unidentified(NativeKeyCode::Android(_))
+                ) =>
             {
                 if let PhysicalKey::Unidentified(NativeKeyCode::Android(code)) = key.physical_key
                     && let Some(button) = pad_button(code)
@@ -429,7 +450,12 @@ impl AndroidGame {
         }
     }
 
-    pub(crate) fn device_event(&mut self, event_loop: &ActiveEventLoop, id: DeviceId, event: DeviceEvent) {
+    pub(crate) fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: DeviceId,
+        event: DeviceEvent,
+    ) {
         if let DeviceEvent::Motion { axis, value } = event {
             // Android's axis numbers (MotionEvent.AXIS_*); sticks point up as minus.
             let v = value as f32;
@@ -530,8 +556,14 @@ impl AndroidGame {
             && in_game
             && let App::Ready(game) = &mut self.app
         {
-            game.mouse
-                .on_move(0.0, 0.0, f64::from(gx * GYRO), f64::from(-gy * GYRO), true, true);
+            game.mouse.on_move(
+                0.0,
+                0.0,
+                f64::from(gx * GYRO),
+                f64::from(-gy * GYRO),
+                true,
+                true,
+            );
         }
         self.typed();
         self.timers(event_loop, now);
@@ -551,7 +583,10 @@ impl AndroidGame {
         if let App::Ready(game) = &mut self.app {
             let typing = !editing
                 && (game.pad_typing()
-                    || game.title.as_mut().is_some_and(|t| t.focused_field().is_some()));
+                    || game
+                        .title
+                        .as_mut()
+                        .is_some_and(|t| t.focused_field().is_some()));
             let want = typing || self.forced_keyboard || (editing && self.keyboard);
             if want != self.keyboard {
                 self.keyboard = want;
@@ -652,7 +687,13 @@ impl AndroidGame {
     }
 
     /// The cursor where the menu's pointer is, and a button pressed or released there.
-    fn menu_mouse(&mut self, event_loop: &ActiveEventLoop, id: WindowId, button: MouseButton, pressed: bool) {
+    fn menu_mouse(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: WindowId,
+        button: MouseButton,
+        pressed: bool,
+    ) {
         let at = self.pointer();
         let device_id = DeviceId::dummy();
         self.app.window_event(
@@ -681,7 +722,9 @@ impl AndroidGame {
     fn move_pointer(&mut self, event_loop: &ActiveEventLoop, id: WindowId, delta: (f32, f32)) {
         let screen = self.screen();
         let at = with_overlay(|o| {
-            let p = o.pointer.unwrap_or((screen.width / 2.0, screen.height / 2.0));
+            let p = o
+                .pointer
+                .unwrap_or((screen.width / 2.0, screen.height / 2.0));
             let p = (
                 (p.0 + delta.0).clamp(0.0, screen.width),
                 (p.1 + delta.1).clamp(0.0, screen.height),
@@ -967,7 +1010,10 @@ impl AndroidGame {
                                 dropped: false,
                             }
                         }
-                        _ if in_game => Role::Look { gestures, held: None },
+                        _ if in_game => Role::Look {
+                            gestures,
+                            held: None,
+                        },
                         _ => Role::Pointer {
                             move_only: false,
                             held: false,
@@ -1008,8 +1054,14 @@ impl AndroidGame {
                 match &mut contact.role {
                     Role::Look { .. } => {
                         if let App::Ready(game) = &mut self.app {
-                            game.mouse
-                                .on_move(0.0, 0.0, f64::from(delta.0), f64::from(delta.1), true, true);
+                            game.mouse.on_move(
+                                0.0,
+                                0.0,
+                                f64::from(delta.0),
+                                f64::from(delta.1),
+                                true,
+                                true,
+                            );
                             game.last_input = now;
                         }
                     }
@@ -1032,7 +1084,11 @@ impl AndroidGame {
                     })
                     .flatten();
                     let ball = with_overlay(|o| o.menu.ball).unwrap_or((0.5, 0.05));
-                    set_preference(&self.home, "touchMenuBall", Some(&format!("{},{}", ball.0, ball.1)));
+                    set_preference(
+                        &self.home,
+                        "touchMenuBall",
+                        Some(&format!("{},{}", ball.0, ball.1)),
+                    );
                 }
                 let Some(contact) = self.contacts.remove(&finger.id) else {
                     return;
@@ -1061,7 +1117,8 @@ impl AndroidGame {
                             } else if gestures && quick {
                                 // Zalith's gesture tap: the right button.
                                 let _ = game.play_mouse(MouseButton::Right, true);
-                                self.releases.push((MouseButton::Right, now + Duration::from_millis(60)));
+                                self.releases
+                                    .push((MouseButton::Right, now + Duration::from_millis(60)));
                             }
                         }
                     }
@@ -1085,7 +1142,13 @@ impl AndroidGame {
     }
 
     /// A finger on the layout editor.
-    fn edit_touch(&mut self, finger: u64, phase: TouchPhase, at: (f32, f32), screen: ControlScreen) {
+    fn edit_touch(
+        &mut self,
+        finger: u64,
+        phase: TouchPhase,
+        at: (f32, f32),
+        screen: ControlScreen,
+    ) {
         let outcome = with_overlay(|o| {
             let editor = o.editor.as_mut()?;
             Some(match phase {
@@ -1219,30 +1282,94 @@ fn glfw_key(name: &str) -> Option<KeyCode> {
         let c = key.as_bytes()[0];
         return Some(match c {
             b'A'..=b'Z' => [
-                K::KeyA, K::KeyB, K::KeyC, K::KeyD, K::KeyE, K::KeyF, K::KeyG, K::KeyH, K::KeyI,
-                K::KeyJ, K::KeyK, K::KeyL, K::KeyM, K::KeyN, K::KeyO, K::KeyP, K::KeyQ, K::KeyR,
-                K::KeyS, K::KeyT, K::KeyU, K::KeyV, K::KeyW, K::KeyX, K::KeyY, K::KeyZ,
+                K::KeyA,
+                K::KeyB,
+                K::KeyC,
+                K::KeyD,
+                K::KeyE,
+                K::KeyF,
+                K::KeyG,
+                K::KeyH,
+                K::KeyI,
+                K::KeyJ,
+                K::KeyK,
+                K::KeyL,
+                K::KeyM,
+                K::KeyN,
+                K::KeyO,
+                K::KeyP,
+                K::KeyQ,
+                K::KeyR,
+                K::KeyS,
+                K::KeyT,
+                K::KeyU,
+                K::KeyV,
+                K::KeyW,
+                K::KeyX,
+                K::KeyY,
+                K::KeyZ,
             ][usize::from(c - b'A')],
             b'0'..=b'9' => [
-                K::Digit0, K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digit5, K::Digit6,
-                K::Digit7, K::Digit8, K::Digit9,
+                K::Digit0,
+                K::Digit1,
+                K::Digit2,
+                K::Digit3,
+                K::Digit4,
+                K::Digit5,
+                K::Digit6,
+                K::Digit7,
+                K::Digit8,
+                K::Digit9,
             ][usize::from(c - b'0')],
             _ => return None,
         });
     }
     if let Some(n) = key.strip_prefix('F').and_then(|n| n.parse::<usize>().ok()) {
         return [
-            K::F1, K::F2, K::F3, K::F4, K::F5, K::F6, K::F7, K::F8, K::F9, K::F10, K::F11, K::F12,
-            K::F13, K::F14, K::F15, K::F16, K::F17, K::F18, K::F19, K::F20, K::F21, K::F22, K::F23,
-            K::F24, K::F25,
+            K::F1,
+            K::F2,
+            K::F3,
+            K::F4,
+            K::F5,
+            K::F6,
+            K::F7,
+            K::F8,
+            K::F9,
+            K::F10,
+            K::F11,
+            K::F12,
+            K::F13,
+            K::F14,
+            K::F15,
+            K::F16,
+            K::F17,
+            K::F18,
+            K::F19,
+            K::F20,
+            K::F21,
+            K::F22,
+            K::F23,
+            K::F24,
+            K::F25,
         ]
         .get(n.wrapping_sub(1))
         .copied();
     }
-    if let Some(n) = key.strip_prefix("KP_").and_then(|n| n.parse::<usize>().ok()) {
+    if let Some(n) = key
+        .strip_prefix("KP_")
+        .and_then(|n| n.parse::<usize>().ok())
+    {
         return [
-            K::Numpad0, K::Numpad1, K::Numpad2, K::Numpad3, K::Numpad4, K::Numpad5, K::Numpad6,
-            K::Numpad7, K::Numpad8, K::Numpad9,
+            K::Numpad0,
+            K::Numpad1,
+            K::Numpad2,
+            K::Numpad3,
+            K::Numpad4,
+            K::Numpad5,
+            K::Numpad6,
+            K::Numpad7,
+            K::Numpad8,
+            K::Numpad9,
         ]
         .get(n)
         .copied();
@@ -1327,9 +1454,15 @@ mod tests {
         assert_eq!(glfw_key("GLFW_KEY_F25"), Some(KeyCode::F25));
         assert_eq!(glfw_key("GLFW_KEY_F26"), None);
         assert_eq!(glfw_key("GLFW_KEY_KP_5"), Some(KeyCode::Numpad5));
-        assert_eq!(glfw_key("GLFW_KEY_LEFT_CONTROL"), Some(KeyCode::ControlLeft));
+        assert_eq!(
+            glfw_key("GLFW_KEY_LEFT_CONTROL"),
+            Some(KeyCode::ControlLeft)
+        );
         assert_eq!(glfw_key("GLFW_KEY_UNKNOWN"), None);
-        assert_eq!(mouse_button("GLFW_MOUSE_BUTTON_RIGHT"), Some(MouseButton::Right));
+        assert_eq!(
+            mouse_button("GLFW_MOUSE_BUTTON_RIGHT"),
+            Some(MouseButton::Right)
+        );
         assert_eq!(pad_button(96), Some(PadButton::South));
     }
 }

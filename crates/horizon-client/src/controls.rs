@@ -9,9 +9,9 @@
 //! finger look around too. Layer events act when a button goes down.
 //! Everything is in physical pixels.
 pub mod editor;
+pub mod layout;
 pub mod menu;
 mod widgets;
-pub mod layout;
 
 use crate::hud::{HudAtlas, HudBatch};
 use crate::ui_theme::{Face, Ui};
@@ -39,9 +39,15 @@ pub struct Screen {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// A key or mouse button by its GLFW name.
-    Key { name: String, pressed: bool },
+    Key {
+        name: String,
+        pressed: bool,
+    },
     /// One of the launcher's (`launcher.event.*`).
-    Launcher { name: String, pressed: bool },
+    Launcher {
+        name: String,
+        pressed: bool,
+    },
     SendText(String),
 }
 
@@ -208,7 +214,11 @@ impl Controls {
 
     fn button_rect(&self, (l, i): Id, screen: Screen) -> Rect {
         let b = &self.layout.layers[l].normal_buttons[i];
-        Self::place(b.position, self.size(&b.button_size, &b.uuid, screen), screen)
+        Self::place(
+            b.position,
+            self.size(&b.button_size, &b.uuid, screen),
+            screen,
+        )
     }
 
     fn stick_rect(&self, (l, i): Id, screen: Screen) -> Rect {
@@ -348,7 +358,11 @@ impl Controls {
     /// Routes a finger that is down at `at` (landing or moving) through the buttons.
     fn route(&mut self, id: u64, at: (f32, f32), in_game: bool, screen: Screen) -> Claim {
         // Swipeable buttons the finger left let go of it.
-        let active = self.fingers.get(&id).map(|f| f.active.clone()).unwrap_or_default();
+        let active = self
+            .fingers
+            .get(&id)
+            .map(|f| f.active.clone())
+            .unwrap_or_default();
         if !active.is_empty() {
             let mut kept = Vec::new();
             let mut removed = false;
@@ -390,10 +404,9 @@ impl Controls {
                 Claim::Taken
             };
         }
-        let blocked = finger
-            .active
-            .iter()
-            .any(|w| Behavior::of(&self.layout.layers[w.0].normal_buttons[w.1]) == Behavior::Toggle);
+        let blocked = finger.active.iter().any(|w| {
+            Behavior::of(&self.layout.layers[w.0].normal_buttons[w.1]) == Behavior::Toggle
+        });
         if !finger.active.contains(&target) && behavior == Behavior::Swipe && !blocked {
             finger.active.push(target);
             self.press(target);
@@ -562,8 +575,9 @@ impl Controls {
                 self.send(&events, true);
             }
         }
-        let can_lock =
-            j.can_lock && direction == Some(Direction::North) && stick.last.1 < -radius * j.lock_threshold;
+        let can_lock = j.can_lock
+            && direction == Some(Direction::North)
+            && stick.last.1 < -radius * j.lock_threshold;
         if can_lock && !stick.can_lock {
             self.send(&j.lock_events, true);
         } else if !can_lock && stick.can_lock {
@@ -576,7 +590,14 @@ impl Controls {
     }
 
     /// Draws every visible control over the HUD; `opacity` is the player's, 0..1.
-    pub fn draw(&mut self, batch: &mut HudBatch, atlas: &HudAtlas, in_game: bool, screen: Screen, opacity: f32) {
+    pub fn draw(
+        &mut self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        in_game: bool,
+        screen: Screen,
+        opacity: f32,
+    ) {
         let mut ui = Ui::new(atlas, batch, (0.0, 0.0));
         // The last layer is at the bottom.
         for l in (0..self.layout.layers.len()).rev() {
@@ -646,10 +667,18 @@ impl Controls {
             .clone();
         let p = w.pressed;
         let alpha = if p { style.pressed_alpha } else { style.alpha } * opacity;
-        let sp = if p { style.pressed_font_size } else { style.font_size }
-            .map_or(TEXT_SP, |s| s as f32);
+        let sp = if p {
+            style.pressed_font_size
+        } else {
+            style.font_size
+        }
+        .map_or(TEXT_SP, |s| s as f32);
         // Zalith draws labels in the system's font (Roboto).
-        let face = if w.bold { Face::SemiBold } else { Face::Control };
+        let face = if w.bold {
+            Face::SemiBold
+        } else {
+            Face::Control
+        };
         let d = ui.density;
         // Text sizes are in the Ui's dp; the layout's are physical pixels.
         let size = sp * screen.density / d;
@@ -666,19 +695,57 @@ impl Controls {
             w.size
         };
         let r = Self::place(w.position, (bw, bh), screen);
-        let (x0, y0, x1, y1) = (r.x.round(), r.y.round(), (r.x + r.w).round(), (r.y + r.h).round());
-        let shape = if p { style.pressed_border_radius } else { style.border_radius };
-        let radii = [shape.top_start, shape.top_end, shape.bottom_end, shape.bottom_start]
-            .map(|r| r * screen.density);
+        let (x0, y0, x1, y1) = (
+            r.x.round(),
+            r.y.round(),
+            (r.x + r.w).round(),
+            (r.y + r.h).round(),
+        );
+        let shape = if p {
+            style.pressed_border_radius
+        } else {
+            style.border_radius
+        };
+        let radii = [
+            shape.top_start,
+            shape.top_end,
+            shape.bottom_end,
+            shape.bottom_start,
+        ]
+        .map(|r| r * screen.density);
         let colour = |c: Argb| with_alpha(c, alpha);
-        let bg = if p { style.pressed_background_color } else { style.background_color };
+        let bg = if p {
+            style.pressed_background_color
+        } else {
+            style.background_color
+        };
         ui.rounded_px(x0, y0, x1, y1, radii, colour(bg));
-        let border = if p { style.pressed_border_width } else { style.border_width };
+        let border = if p {
+            style.pressed_border_width
+        } else {
+            style.border_width
+        };
         if border > 0 {
-            let bc = if p { style.pressed_border_color } else { style.border_color };
-            ui.border_px(x0, y0, x1, y1, radii, border as f32 * screen.density, colour(bc));
+            let bc = if p {
+                style.pressed_border_color
+            } else {
+                style.border_color
+            };
+            ui.border_px(
+                x0,
+                y0,
+                x1,
+                y1,
+                radii,
+                border as f32 * screen.density,
+                colour(bc),
+            );
         }
-        let content = colour(if p { style.pressed_content_color } else { style.content_color });
+        let content = colour(if p {
+            style.pressed_content_color
+        } else {
+            style.content_color
+        });
         let top = (y0 + y1) / 2.0 / d - text_h / 2.0;
         let left = (x0 + x1) / 2.0 / d - text_w / 2.0;
         for (n, (text, width)) in lines.iter().zip(&widths).enumerate() {
@@ -691,7 +758,14 @@ impl Controls {
             ui.text_line(face, size, line, x, y, content, text);
             if w.underline {
                 let under = ((y + line * 0.92) * d).round();
-                ui.rounded_px((x * d).round(), under, ((x + width) * d).round(), under + 1.0, [0.0; 4], content);
+                ui.rounded_px(
+                    (x * d).round(),
+                    under,
+                    ((x + width) * d).round(),
+                    under + 1.0,
+                    [0.0; 4],
+                    content,
+                );
             }
         }
     }
@@ -703,12 +777,25 @@ impl Controls {
         let alpha = shape.alpha * opacity;
         let colour = |c: Argb| with_alpha(c, alpha);
         let side = r.w.min(r.h);
-        let (x0, y0, x1, y1) = (r.x.round(), r.y.round(), (r.x + r.w).round(), (r.y + r.h).round());
+        let (x0, y0, x1, y1) = (
+            r.x.round(),
+            r.y.round(),
+            (r.x + r.w).round(),
+            (r.y + r.h).round(),
+        );
         let corner = side * shape.background_shape as f32 / 100.0;
         ui.rounded_px(x0, y0, x1, y1, [corner; 4], colour(shape.background_color));
         let border = side * (shape.border_width_ratio as f32 / 100.0).clamp(0.0, 0.5);
         if border >= 1.0 {
-            ui.border_px(x0, y0, x1, y1, [corner; 4], border, colour(shape.border_color));
+            ui.border_px(
+                x0,
+                y0,
+                x1,
+                y1,
+                [corner; 4],
+                border,
+                colour(shape.border_color),
+            );
         }
         let knob = side * shape.joystick_size.clamp(0.0, 1.0);
         let (cx, cy) = (r.x + r.w / 2.0 + s.knob.0, r.y + r.h / 2.0 + s.knob.1);
@@ -764,8 +851,16 @@ pub fn draw_pointer(batch: &mut HudBatch, atlas: &HudAtlas, at: (f32, f32), size
             let [x, y, _] = point(v, 0.0, offset);
             [x, y]
         };
-        batch.fill_quad(atlas, [p(HEAD[0]), p(HEAD[1]), p(HEAD[2]), p(HEAD[2])], colour);
-        batch.fill_quad(atlas, [p(TAIL[0]), p(TAIL[1]), p(TAIL[2]), p(TAIL[3])], colour);
+        batch.fill_quad(
+            atlas,
+            [p(HEAD[0]), p(HEAD[1]), p(HEAD[2]), p(HEAD[2])],
+            colour,
+        );
+        batch.fill_quad(
+            atlas,
+            [p(TAIL[0]), p(TAIL[1]), p(TAIL[2]), p(TAIL[3])],
+            colour,
+        );
     }
 }
 

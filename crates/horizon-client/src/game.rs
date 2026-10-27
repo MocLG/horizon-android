@@ -3,10 +3,10 @@
 mod advancements;
 mod advancements_screen;
 mod agent;
-#[cfg(target_os = "android")]
-pub(crate) mod android;
 mod agent_settings;
 mod allays;
+#[cfg(target_os = "android")]
+pub(crate) mod android;
 mod armor_stands;
 mod banners;
 mod beacon;

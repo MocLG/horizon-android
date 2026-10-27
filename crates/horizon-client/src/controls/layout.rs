@@ -534,7 +534,8 @@ impl Layout {
                 "This control layout is version {version}; Horizon reads up to {EDITOR_VERSION}"
             ));
         }
-        let mut layout: Layout = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        let mut layout: Layout =
+            serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
         if version < 12
             && let Ok(Legacy {
                 special:
