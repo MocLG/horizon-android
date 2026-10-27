@@ -48,10 +48,14 @@ public class HorizonActivity extends NativeActivity {
     /** A key the soft keyboard pressed: 1 is backspace, 2 is enter, 3 is the back gesture. */
     static native void nativeKey(int key);
 
+    /** The soft keyboard showed or hid, whoever asked it to. */
+    static native void nativeKeyboard(boolean shown);
+
     /** The phone turned by (x, y) radians since the last call: the gyroscope's look. */
     static native void nativeGyro(float x, float y);
 
     private TextSink sink;
+    private boolean keyboardShown;
     private SensorEventListener gyroscope;
 
     @Override
@@ -60,6 +64,18 @@ public class HorizonActivity extends NativeActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         sink = new TextSink(this);
         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
+        if (Build.VERSION.SDK_INT >= 30) {
+            // The keyboard also hides on its own arrow or a swipe, which the
+            // game has to know to show it again on the next press.
+            getWindow().getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
+                boolean shown = insets.isVisible(WindowInsets.Type.ime());
+                if (shown != keyboardShown) {
+                    keyboardShown = shown;
+                    nativeKeyboard(shown);
+                }
+                return view.onApplyWindowInsets(insets);
+            });
+        }
         if (Build.VERSION.SDK_INT >= 33) {
             // Back is the game's, as Escape is: the activity never finishes on it.
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -246,8 +262,23 @@ public class HorizonActivity extends NativeActivity {
             sink.setFocusableInTouchMode(true);
             sink.requestFocus();
             manager.restartInput(sink);
-            manager.showSoftInput(sink, 0);
+            // showSoftInput is ignored until the view has taken focus.
+            sink.post(() -> {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    WindowInsetsController controller = getWindow().getInsetsController();
+                    if (controller != null) {
+                        controller.show(WindowInsets.Type.ime());
+                    }
+                }
+                manager.showSoftInput(sink, 0);
+            });
         } else {
+            if (Build.VERSION.SDK_INT >= 30) {
+                WindowInsetsController controller = getWindow().getInsetsController();
+                if (controller != null) {
+                    controller.hide(WindowInsets.Type.ime());
+                }
+            }
             manager.hideSoftInputFromWindow(sink.getWindowToken(), 0);
             sink.clearFocus();
         }

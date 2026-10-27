@@ -129,7 +129,14 @@ pub(crate) struct AndroidGame {
     scrolling: Option<(f32, Instant)>,
     /// The last tap on the hotbar, for a double tap.
     last_slot_tap: Option<(usize, Instant)>,
+    /// Whether the game asks for the soft keyboard, and when it last did.
     keyboard: bool,
+    keyboard_asked: Instant,
+    /// Whether it shows, as Android last told; none before it ever did.
+    keyboard_shown: Option<bool>,
+    /// The player hid it while a field wanted it: it stays hidden until the
+    /// field closes or the IME button is pressed.
+    keyboard_dismissed: bool,
     /// The IME button opened the keyboard without a field.
     forced_keyboard: bool,
     enabled: bool,
@@ -292,6 +299,9 @@ impl AndroidGame {
             scrolling: None,
             last_slot_tap: None,
             keyboard: false,
+            keyboard_asked: Instant::now(),
+            keyboard_shown: None,
+            keyboard_dismissed: false,
             forced_keyboard: false,
             enabled,
             dp,
@@ -386,9 +396,8 @@ impl AndroidGame {
 
     /// The app left the screen and its window with it.
     pub(crate) fn suspended(&mut self, event_loop: &ActiveEventLoop) {
-        jni::show_keyboard(false);
+        self.ask_keyboard(false);
         jni::gyroscope(false);
-        self.keyboard = false;
         self.forced_keyboard = false;
         if let Some(renderer) = self.renderer() {
             renderer.release_surface();
@@ -511,8 +520,7 @@ impl AndroidGame {
         })
         .unwrap_or(false);
         if closed {
-            jni::show_keyboard(false);
-            self.keyboard = false;
+            self.ask_keyboard(false);
             return;
         }
         if let App::Ready(game) = &mut self.app
@@ -565,6 +573,7 @@ impl AndroidGame {
                 true,
             );
         }
+        self.keyboard_changed();
         self.typed();
         self.timers(event_loop, now);
         for (button, _) in self.releases.extract_if(.., |(_, at)| now >= *at) {
@@ -587,13 +596,66 @@ impl AndroidGame {
                         .title
                         .as_mut()
                         .is_some_and(|t| t.focused_field().is_some()));
-            let want = typing || self.forced_keyboard || (editing && self.keyboard);
+            if !typing {
+                self.keyboard_dismissed = false;
+            }
+            let want = (typing && !self.keyboard_dismissed)
+                || self.forced_keyboard
+                || (editing && self.keyboard);
             if want != self.keyboard {
-                self.keyboard = want;
-                jni::show_keyboard(want);
+                self.ask_keyboard(want);
             }
         }
         self.app.about_to_wait(event_loop);
+    }
+
+    fn ask_keyboard(&mut self, show: bool) {
+        self.keyboard = show;
+        self.keyboard_asked = Instant::now();
+        jni::show_keyboard(show);
+    }
+
+    /// The IME button: hides the keyboard where it shows, else shows it.
+    fn toggle_keyboard(&mut self) {
+        if self.keyboard_shown.unwrap_or(self.keyboard) {
+            self.forced_keyboard = false;
+            self.keyboard_dismissed = true;
+            if self.keyboard {
+                self.ask_keyboard(false);
+            } else {
+                // It showed without the game asking.
+                jni::show_keyboard(false);
+            }
+        } else {
+            self.forced_keyboard = true;
+            self.keyboard_dismissed = false;
+            self.ask_keyboard(true);
+        }
+    }
+
+    /// Android showed or hid the keyboard, whether or not the game asked.
+    fn keyboard_changed(&mut self) {
+        let Some(shown) = jni::take_keyboard() else {
+            return;
+        };
+        self.keyboard_shown = Some(shown);
+        // A change just after a request may still be the one before it.
+        if self.keyboard_asked.elapsed() < Duration::from_millis(600) {
+            return;
+        }
+        if !shown && self.keyboard {
+            // Its own arrow or a swipe hid it.
+            self.keyboard = false;
+            self.forced_keyboard = false;
+            self.keyboard_dismissed = true;
+            with_overlay(|o| {
+                if let Some(editor) = o.editor.as_mut() {
+                    editor.finish_typing();
+                }
+            });
+        } else if shown && !self.keyboard {
+            jni::show_keyboard(false);
+        }
     }
 
     fn typed(&mut self) {
@@ -611,8 +673,7 @@ impl AndroidGame {
                 })
                 .flatten();
                 if done.is_some() {
-                    self.keyboard = false;
-                    jni::show_keyboard(false);
+                    self.ask_keyboard(false);
                 }
             }
             return;
@@ -824,9 +885,7 @@ impl AndroidGame {
                     }
                 }
                 ControlEvent::Launcher { name, pressed } => match name.as_str() {
-                    "launcher.event.switch_ime" if pressed => {
-                        self.forced_keyboard = !self.forced_keyboard;
-                    }
+                    "launcher.event.switch_ime" if pressed => self.toggle_keyboard(),
                     "launcher.event.scroll_up" | "launcher.event.scroll_down" => {
                         let lines = if name.ends_with("up") { 1.0 } else { -1.0 };
                         self.scrolling = pressed.then(|| (lines, Instant::now()));
@@ -950,7 +1009,7 @@ impl AndroidGame {
                 }
             }
             Choice::Keyboard => {
-                self.forced_keyboard = !self.forced_keyboard;
+                self.toggle_keyboard();
                 with_overlay(|o| o.menu.open = false);
             }
             Choice::Pause => {
@@ -1167,10 +1226,7 @@ impl AndroidGame {
         .unwrap_or(Outcome::None);
         match outcome {
             Outcome::None => {}
-            Outcome::Keyboard(show) => {
-                self.keyboard = show;
-                jni::show_keyboard(show);
-            }
+            Outcome::Keyboard(show) => self.ask_keyboard(show),
             Outcome::Save => {
                 let home = self.home.clone();
                 let saved = with_overlay(|o| {
@@ -1186,8 +1242,7 @@ impl AndroidGame {
                     Some(Err(e)) => log::warn!("Horizon: the control layout was not saved: {e}"),
                     None => {}
                 }
-                self.keyboard = false;
-                jni::show_keyboard(false);
+                self.ask_keyboard(false);
             }
             Outcome::Exit => {
                 let home = self.home.clone();
@@ -1199,8 +1254,7 @@ impl AndroidGame {
                         o.settings.fitted = 0.0;
                     }
                 });
-                self.keyboard = false;
-                jni::show_keyboard(false);
+                self.ask_keyboard(false);
             }
         }
     }

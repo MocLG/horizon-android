@@ -63,6 +63,25 @@ extern "system" fn Java_com_lukagejak_horizon_HorizonActivity_nativeKey<'caller>
     }
 }
 
+/// Whether the soft keyboard last showed or hid, until the game takes it.
+static KEYBOARD: Mutex<Option<bool>> = Mutex::new(None);
+
+pub fn take_keyboard() -> Option<bool> {
+    KEYBOARD.lock().unwrap().take()
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_lukagejak_horizon_HorizonActivity_nativeKeyboard<'caller>(
+    _env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    shown: jni::sys::jboolean,
+) {
+    *KEYBOARD.lock().unwrap() = Some(shown);
+    if let Some(proxy) = WAKE.lock().unwrap().as_ref() {
+        let _ = proxy.send_event(());
+    }
+}
+
 static GYRO: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
 
 #[unsafe(no_mangle)]
