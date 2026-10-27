@@ -669,7 +669,7 @@ impl Launcher {
         ui.text(
             r.x,
             y,
-            "Your account, the controls, performance and the game's files.",
+            "Your account, the controls and the game's files.",
             Face::Regular,
             14.0,
             hex(P.muted, 1.0),
@@ -794,57 +794,60 @@ impl Launcher {
             control,
         );
         if ui.row_button(row, preset.label(), false, true) {
-            let preset = next_choice(
-                &[
-                    Preset::Performance,
-                    Preset::Balanced,
-                    Preset::Quality,
-                    Preset::Ultra,
-                ],
-                preset,
-            );
+            let preset = match self.settings.horizon.preset {
+                Preset::Performance => Preset::Balanced,
+                Preset::Balanced => Preset::Quality,
+                Preset::Quality => Preset::Ultra,
+                Preset::Ultra => Preset::Performance,
+                Preset::Custom => Preset::Performance,
+            };
             graphics::apply_preset(preset, &mut self.settings);
+            self.settings.horizon.preset = preset;
             self.save_performance();
         }
 
         let (row, i) = next(&mut y);
         let scales = [50, 60, 70, 80, 90, 100];
+        let scale = self.settings.horizon.resolution_scale;
         let control = ui.button_width("100%");
         ui.row(
             row,
             i,
             "Resolution scale",
-            "World pixels per screen pixel. Below 100% is faster on the GPU.",
+            "World pixels per screen pixel; below 100% is faster on the GPU.",
             control,
         );
         if ui.row_button(
             row,
-            &format!("{}%", self.settings.horizon.resolution_scale),
+            &format!("{}%", scale),
             false,
             true,
         ) {
-            self.settings.horizon.resolution_scale =
-                next_number(&scales, self.settings.horizon.resolution_scale);
+            let next = scales
+                .into_iter()
+                .find(|s| *s > scale)
+                .unwrap_or(scales[0]);
+            self.settings.horizon.resolution_scale = next;
             self.save_performance();
         }
 
         let (row, i) = next(&mut y);
         let framerates = [30, 45, 60, 90, 120, 144, 165, 260];
+        let fps = self.settings.max_fps;
         let control = ui.button_width("Unlimited");
         ui.row(
             row,
             i,
             "Maximum FPS",
-            "A cap saves power and heat. Unlimited is 260.",
+            "A cap saves power and heat; unlimited is 260.",
             control,
         );
-        let fps = if self.settings.max_fps >= 260 {
-            "Unlimited".to_owned()
-        } else {
-            format!("{} FPS", self.settings.max_fps)
-        };
-        if ui.row_button(row, &fps, false, true) {
-            self.settings.max_fps = next_number(&framerates, self.settings.max_fps);
+        if ui.row_button(row, &format!("{} FPS", fps), false, true) {
+            let next = framerates
+                .into_iter()
+                .find(|f| *f > fps)
+                .unwrap_or(framerates[0]);
+            self.settings.max_fps = next;
             self.save_performance();
         }
 
@@ -863,6 +866,7 @@ impl Launcher {
 
         let (row, i) = next(&mut y);
         let distances = [4, 6, 8, 10, 12, 16, 24, 32];
+        let rd = self.settings.render_distance;
         let control = ui.button_width("32 chunks");
         ui.row(
             row,
@@ -871,18 +875,18 @@ impl Launcher {
             "Full-detail terrain around you, in chunks.",
             control,
         );
-        if ui.row_button(
-            row,
-            &format!("{} chunks", self.settings.render_distance),
-            false,
-            true,
-        ) {
-            self.settings.render_distance = next_number(&distances, self.settings.render_distance);
+        if ui.row_button(row, &format!("{} chunks", rd), false, true) {
+            let next = distances
+                .into_iter()
+                .find(|d| *d > rd)
+                .unwrap_or(distances[0]);
+            self.settings.render_distance = next;
             self.save_performance();
         }
 
         let (row, i) = next(&mut y);
         let distances = [5, 6, 8, 10, 12, 16, 24, 32];
+        let sim = self.settings.simulation_distance;
         let control = ui.button_width("32 chunks");
         ui.row(
             row,
@@ -891,19 +895,22 @@ impl Launcher {
             "How far blocks, mobs and random ticks update, in chunks.",
             control,
         );
-        if ui.row_button(
-            row,
-            &format!("{} chunks", self.settings.simulation_distance),
-            false,
-            true,
-        ) {
-            self.settings.simulation_distance =
-                next_number(&distances, self.settings.simulation_distance);
+        if ui.row_button(row, &format!("{} chunks", sim), false, true) {
+            let next = distances
+                .into_iter()
+                .find(|d| *d > sim)
+                .unwrap_or(distances[0]);
+            self.settings.simulation_distance = next;
             self.save_performance();
         }
 
         let (row, i) = next(&mut y);
-        let workers = worker_choices();
+        let workers = [1, 2, 3, 4, 6, 8];
+        let value = if self.settings.horizon.workers == 0 {
+            format!("Auto ({})", self.settings.horizon.worker_threads())
+        } else {
+            self.settings.horizon.workers.to_string()
+        };
         let control = ui.button_width("Auto (00)");
         ui.row(
             row,
@@ -912,13 +919,12 @@ impl Launcher {
             "Chunk generation, light and meshing. Auto is every core but one; fewer leave headroom.",
             control,
         );
-        let value = if self.settings.horizon.workers == 0 {
-            format!("Auto ({})", self.settings.horizon.worker_threads())
-        } else {
-            self.settings.horizon.workers.to_string()
-        };
         if ui.row_button(row, &value, false, true) {
-            self.settings.horizon.workers = next_number(&workers, self.settings.horizon.workers);
+            let next = workers
+                .into_iter()
+                .find(|t| *t > self.settings.horizon.workers)
+                .unwrap_or(workers[0]);
+            self.settings.horizon.workers = next;
             self.save_performance();
         }
 
@@ -937,22 +943,26 @@ impl Launcher {
 
         let (row, i) = next(&mut y);
         let budgets = [0, 256, 512, 1024, 2048, 4096, 8192, 16384];
-        let control = ui.button_width("16384 KiB");
-        ui.row(
-            row,
-            i,
-            "Upload budget",
-            "Mesh data sent to the GPU per frame. Unlimited is fastest when there is headroom.",
-            control,
-        );
-        let value = match self.settings.horizon.upload_budget_kib {
+        let budget = self.settings.horizon.upload_budget_kib;
+        let value = match budget {
             0 => "Unlimited".to_owned(),
             n if n >= 1024 => format!("{} MiB", n / 1024),
             n => format!("{n} KiB"),
         };
+        let control = ui.button_width("16 MiB");
+        ui.row(
+            row,
+            i,
+            "Upload budget",
+            "Mesh data sent to the GPU each frame. Unlimited is fastest with headroom.",
+            control,
+        );
         if ui.row_button(row, &value, false, true) {
-            self.settings.horizon.upload_budget_kib =
-                next_number(&budgets, self.settings.horizon.upload_budget_kib);
+            let next = budgets
+                .into_iter()
+                .find(|b| *b > budget)
+                .unwrap_or(budgets[0]);
+            self.settings.horizon.upload_budget_kib = next;
             self.save_performance();
         }
 
@@ -970,11 +980,9 @@ impl Launcher {
         }
 
         let (row, i) = next(&mut y);
-        let apis = [GraphicsApi::Auto, GraphicsApi::Vulkan, GraphicsApi::OpenGl];
-        let api = if apis.contains(&self.settings.horizon.api) {
-            self.settings.horizon.api
-        } else {
-            GraphicsApi::Auto
+        let api = match self.settings.horizon.api {
+            GraphicsApi::Auto | GraphicsApi::Vulkan | GraphicsApi::OpenGl => self.settings.horizon.api,
+            _ => GraphicsApi::Auto,
         };
         let control = ui.button_width("Vulkan");
         ui.row(
@@ -985,7 +993,13 @@ impl Launcher {
             control,
         );
         if ui.row_button(row, api.label(), false, true) {
-            self.settings.horizon.api = next_choice(&apis, api);
+            let next = match api {
+                GraphicsApi::Auto => GraphicsApi::Vulkan,
+                GraphicsApi::Vulkan => GraphicsApi::OpenGl,
+                GraphicsApi::OpenGl => GraphicsApi::Auto,
+                _ => GraphicsApi::Auto,
+            };
+            self.settings.horizon.api = next;
             self.save_performance();
         }
 
@@ -1005,7 +1019,13 @@ impl Launcher {
 
         if self.game_mode != "unsupported" {
             let (row, i) = next(&mut y);
-            let mode = game_mode_label(&self.game_mode);
+            let mode = match self.game_mode.as_str() {
+                "performance" => "Performance",
+                "battery" => "Battery",
+                "standard" => "Standard",
+                "custom" => "Custom",
+                _ => "Not supported",
+            };
             let control = ui.button_width("Refresh");
             ui.row(
                 row,
@@ -1062,33 +1082,6 @@ impl Launcher {
         );
         y = self.task_and_error(ui, r, y + 12.0);
         y - self.scroll
-    }
-}
-
-fn next_choice<T: Copy + PartialEq>(all: &[T], now: T) -> T {
-    let i = all.iter().position(|x| *x == now).unwrap_or(0);
-    all[(i + 1) % all.len()]
-}
-
-fn next_number<T: Copy + PartialOrd>(all: &[T], now: T) -> T {
-    all.iter().copied().find(|x| *x > now).unwrap_or(all[0])
-}
-
-fn worker_choices() -> Vec<u32> {
-    let max = std::thread::available_parallelism().map_or(8, |n| n.get() as u32);
-    [0, 2, 3, 4, 6, 8, 10, 12]
-        .into_iter()
-        .filter(|n| *n == 0 || *n <= max)
-        .collect()
-}
-
-fn game_mode_label(mode: &str) -> &'static str {
-    match mode {
-        "performance" => "Performance",
-        "battery" => "Battery",
-        "standard" => "Standard",
-        "custom" => "Custom",
-        _ => "Not supported",
     }
 }
 
