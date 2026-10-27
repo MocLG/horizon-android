@@ -23,7 +23,6 @@ use winit::window::Window;
 enum Page {
     Play,
     Settings,
-    Performance,
 }
 
 /// A text field the soft keyboard types into: the client ID.
@@ -373,7 +372,6 @@ impl Launcher {
         let page_h = match self.page {
             Page::Play => self.play_page(ui, content, top + self.scroll),
             Page::Settings => self.settings_page(ui, content, top + self.scroll),
-            Page::Performance => self.performance_page(ui, content, top + self.scroll),
         };
         // Scrolling stops at the end of the page.
         let overflow = (page_h - h + 24.0).max(0.0);
@@ -382,11 +380,7 @@ impl Launcher {
         ui.c.rect(Rect::new(0.0, 0.0, w, 56.0), 0.0, hex(P.page, 1.0));
         ui.text(left, 18.0, "Horizon", Face::Medium, 17.0, hex(P.ink, 1.0));
         let mut x = content.right();
-        for (page, label) in [
-            (Page::Performance, "Performance"),
-            (Page::Settings, "Settings"),
-            (Page::Play, "Play"),
-        ] {
+        for (page, label) in [(Page::Settings, "Settings"), (Page::Play, "Play")] {
             let tw = ui.c.measure(label, Face::Medium, horizon_theme::UI.px) + 28.0;
             x -= tw;
             let r = Rect::new(x, 12.0, tw, CONTROL);
@@ -669,13 +663,13 @@ impl Launcher {
         }
     }
 
-    fn performance_page(&mut self, ui: &mut Ui, r: Rect, mut y: f32) -> f32 {
-        ui.text(r.x, y, "Performance", Face::Medium, 44.0, hex(P.ink, 1.0));
+    fn settings_page(&mut self, ui: &mut Ui, r: Rect, mut y: f32) -> f32 {
+        ui.text(r.x, y, "Settings", Face::Medium, 44.0, hex(P.ink, 1.0));
         y += ui.c.line(Face::Medium, 44.0) + 4.0;
         ui.text(
             r.x,
             y,
-            "Written to options.txt and horizon-graphics.txt before Play.",
+            "Your account, the controls, performance and the game's files.",
             Face::Regular,
             14.0,
             hex(P.muted, 1.0),
@@ -689,6 +683,106 @@ impl Launcher {
             *y += ROW;
             (row, index)
         };
+        // Microsoft account.
+        let (row, i) = next(&mut y);
+        match self.signed_in().cloned() {
+            Some(a) => {
+                ui.row(row, i, "Microsoft account", &format!("Signed in as {}.", a.name), 110.0);
+                if ui.row_button(row, "Sign out", false, true) {
+                    let mut accounts = account::Accounts::load();
+                    if let Err(e) = accounts.remove(account::store(), &a.uuid).and_then(|_| accounts.save()) {
+                        self.error = Some(e);
+                    }
+                    self.accounts = account::Accounts::load();
+                }
+            }
+            None => {
+                ui.row(row, i, "Microsoft account", "Not signed in: the game plays offline.", 110.0);
+                if ui.row_button(row, "Sign in", false, self.sign_in.is_none()) {
+                    self.start_sign_in();
+                }
+            }
+        }
+        // The Azure app the sign-in uses.
+        let (row, i) = next(&mut y);
+        let editing = self.editing.is_some();
+        let detail = match (&self.editing, account::client_id()) {
+            (Some(e), _) => format!("{}|", e.text),
+            (None, Some(id)) => id,
+            (None, None) => "Not set. Sign-in needs the client ID of an Azure app Mojang approved.".into(),
+        };
+        ui.row(row, i, "Azure client ID", &detail, 90.0);
+        if editing {
+            if ui.row_button(row, "Save", true, true) {
+                let id = self.editing.take().map(|e| e.text).unwrap_or_default();
+                self.save_client_id(id.trim());
+                jni::show_keyboard(false);
+            }
+        } else if ui.row_button(row, "Edit", false, true) {
+            self.editing = Some(Editing {
+                text: account::client_id().unwrap_or_default(),
+            });
+            jni::take_typed();
+            jni::show_keyboard(true);
+        }
+        // Touch controls.
+        let (row, i) = next(&mut y);
+        ui.row(
+            row,
+            i,
+            "Touch controls",
+            "Buttons and a joystick over the game, as in Zalith Launcher 2. Off with a controller or keyboard.",
+            48.0,
+        );
+        if let Some(on) = ui.switch(row, self.touch) {
+            self.touch = on;
+            set_preference(&self.paths.home, "touchControls", if on { "true" } else { "false" });
+        }
+        // The control layout, and Zalith Launcher 2's layouts in and out.
+        let (row, i) = next(&mut y);
+        let layouts = controls::layouts(&self.paths.home);
+        let current = controls::selected(&self.paths.home);
+        let index = layouts.iter().position(|(file, _)| *file == current).unwrap_or(0);
+        let name = layouts.get(index).map_or("Default", |(_, name)| name.as_str());
+        ui.row(
+            row,
+            i,
+            "Control layout",
+            &format!("{name}, {} of {}.", index + 1, layouts.len()),
+            90.0,
+        );
+        if ui.row_button(row, "Next", false, layouts.len() > 1) {
+            let (file, _) = &layouts[(index + 1) % layouts.len()];
+            set_preference(&self.paths.home, "controlLayout", file);
+        }
+        let (row, i) = next(&mut y);
+        let folder = self.paths.shared.join("controls");
+        ui.row(
+            row,
+            i,
+            "Import and export layouts",
+            &format!(
+                "Zalith Launcher 2's layouts work as they are: copy their .json files to {}, then Import. Export puts the current layout there.",
+                folder.display()
+            ),
+            190.0,
+        );
+        let export = ui.button_width("Export");
+        let import_rect = Rect::new(row.right() - export - 8.0 - ui.button_width("Import"), row.y + (row.h - CONTROL) / 2.0, ui.button_width("Import"), CONTROL);
+        if ui.button(import_rect, "Import", false, true) {
+            self.error = Some(match controls::import(&folder, &self.paths.home) {
+                Ok(0) => format!("No layouts to import in {}.", folder.display()),
+                Ok(n) => format!("Imported {n} control layouts."),
+                Err(e) => e,
+            });
+        }
+        if ui.row_button(row, "Export", false, true) {
+            self.error = Some(match controls::export(&self.paths.home, &folder) {
+                Ok(file) => format!("Exported to {}.", file.display()),
+                Err(e) => e,
+            });
+        }
+
         let (row, i) = next(&mut y);
         let preset = self.settings.horizon.preset;
         let control = ui.button_width("Performance");
@@ -909,146 +1003,32 @@ impl Launcher {
             jni::platform("sustained_performance", if on { "1" } else { "0" });
         }
 
-        let (row, i) = next(&mut y);
-        let mode = game_mode_label(&self.game_mode);
-        let control = ui.button_width("Refresh");
-        ui.row(
-            row,
-            i,
-            "Android game mode",
-            &format!(
-                "Android reports {mode}. Chosen in the Game Dashboard; Horizon reads the hint."
-            ),
-            control,
-        );
-        if ui.row_button(row, "Refresh", false, true) {
-            self.game_mode = jni::platform("game_mode", "").unwrap_or_else(|| "unsupported".into());
-            if self.game_mode == "battery" && !self.settings.horizon.battery {
-                self.settings.horizon.battery = true;
-                self.settings.max_fps = self.settings.max_fps.min(60);
-                self.save_performance();
-            } else if self.game_mode == "performance" && !self.sustained {
-                self.sustained = true;
-                self.save_performance();
-                jni::platform("sustained_performance", "1");
-            }
-        }
-
-        y = self.task_and_error(ui, r, y + 12.0);
-        y - self.scroll
-    }
-
-    fn settings_page(&mut self, ui: &mut Ui, r: Rect, mut y: f32) -> f32 {
-        ui.text(r.x, y, "Settings", Face::Medium, 44.0, hex(P.ink, 1.0));
-        y += ui.c.line(Face::Medium, 44.0) + 4.0;
-        ui.text(r.x, y, "Your account, the controls and the game's files.", Face::Regular, 14.0, hex(P.muted, 1.0));
-        y += 34.0;
-        ui.c.rule(r.x, y, r.w, hex(P.rule, 1.0));
-        let mut index = 0;
-        let mut next = |y: &mut f32| {
-            index += 1;
-            let row = Rect::new(r.x, *y, r.w, ROW);
-            *y += ROW;
-            (row, index)
-        };
-        // Microsoft account.
-        let (row, i) = next(&mut y);
-        match self.signed_in().cloned() {
-            Some(a) => {
-                ui.row(row, i, "Microsoft account", &format!("Signed in as {}.", a.name), 110.0);
-                if ui.row_button(row, "Sign out", false, true) {
-                    let mut accounts = account::Accounts::load();
-                    if let Err(e) = accounts.remove(account::store(), &a.uuid).and_then(|_| accounts.save()) {
-                        self.error = Some(e);
-                    }
-                    self.accounts = account::Accounts::load();
+        if self.game_mode != "unsupported" {
+            let (row, i) = next(&mut y);
+            let mode = game_mode_label(&self.game_mode);
+            let control = ui.button_width("Refresh");
+            ui.row(
+                row,
+                i,
+                "Android game mode",
+                &format!(
+                    "Android reports {mode}. Chosen in the Game Dashboard; Horizon reads the hint."
+                ),
+                control,
+            );
+            if ui.row_button(row, "Refresh", false, true) {
+                self.game_mode =
+                    jni::platform("game_mode", "").unwrap_or_else(|| "unsupported".into());
+                if self.game_mode == "battery" && !self.settings.horizon.battery {
+                    self.settings.horizon.battery = true;
+                    self.settings.max_fps = self.settings.max_fps.min(60);
+                    self.save_performance();
+                } else if self.game_mode == "performance" && !self.sustained {
+                    self.sustained = true;
+                    self.save_performance();
+                    jni::platform("sustained_performance", "1");
                 }
             }
-            None => {
-                ui.row(row, i, "Microsoft account", "Not signed in: the game plays offline.", 110.0);
-                if ui.row_button(row, "Sign in", false, self.sign_in.is_none()) {
-                    self.start_sign_in();
-                }
-            }
-        }
-        // The Azure app the sign-in uses.
-        let (row, i) = next(&mut y);
-        let editing = self.editing.is_some();
-        let detail = match (&self.editing, account::client_id()) {
-            (Some(e), _) => format!("{}|", e.text),
-            (None, Some(id)) => id,
-            (None, None) => "Not set. Sign-in needs the client ID of an Azure app Mojang approved.".into(),
-        };
-        ui.row(row, i, "Azure client ID", &detail, 90.0);
-        if editing {
-            if ui.row_button(row, "Save", true, true) {
-                let id = self.editing.take().map(|e| e.text).unwrap_or_default();
-                self.save_client_id(id.trim());
-                jni::show_keyboard(false);
-            }
-        } else if ui.row_button(row, "Edit", false, true) {
-            self.editing = Some(Editing {
-                text: account::client_id().unwrap_or_default(),
-            });
-            jni::take_typed();
-            jni::show_keyboard(true);
-        }
-        // Touch controls.
-        let (row, i) = next(&mut y);
-        ui.row(
-            row,
-            i,
-            "Touch controls",
-            "Buttons and a joystick over the game, as in Zalith Launcher 2. Off with a controller or keyboard.",
-            48.0,
-        );
-        if let Some(on) = ui.switch(row, self.touch) {
-            self.touch = on;
-            set_preference(&self.paths.home, "touchControls", if on { "true" } else { "false" });
-        }
-        // The control layout, and Zalith Launcher 2's layouts in and out.
-        let (row, i) = next(&mut y);
-        let layouts = controls::layouts(&self.paths.home);
-        let current = controls::selected(&self.paths.home);
-        let index = layouts.iter().position(|(file, _)| *file == current).unwrap_or(0);
-        let name = layouts.get(index).map_or("Default", |(_, name)| name.as_str());
-        ui.row(
-            row,
-            i,
-            "Control layout",
-            &format!("{name}, {} of {}.", index + 1, layouts.len()),
-            90.0,
-        );
-        if ui.row_button(row, "Next", false, layouts.len() > 1) {
-            let (file, _) = &layouts[(index + 1) % layouts.len()];
-            set_preference(&self.paths.home, "controlLayout", file);
-        }
-        let (row, i) = next(&mut y);
-        let folder = self.paths.shared.join("controls");
-        ui.row(
-            row,
-            i,
-            "Import and export layouts",
-            &format!(
-                "Zalith Launcher 2's layouts work as they are: copy their .json files to {}, then Import. Export puts the current layout there.",
-                folder.display()
-            ),
-            190.0,
-        );
-        let export = ui.button_width("Export");
-        let import_rect = Rect::new(row.right() - export - 8.0 - ui.button_width("Import"), row.y + (row.h - CONTROL) / 2.0, ui.button_width("Import"), CONTROL);
-        if ui.button(import_rect, "Import", false, true) {
-            self.error = Some(match controls::import(&folder, &self.paths.home) {
-                Ok(0) => format!("No layouts to import in {}.", folder.display()),
-                Ok(n) => format!("Imported {n} control layouts."),
-                Err(e) => e,
-            });
-        }
-        if ui.row_button(row, "Export", false, true) {
-            self.error = Some(match controls::export(&self.paths.home, &folder) {
-                Ok(file) => format!("Exported to {}.", file.display()),
-                Err(e) => e,
-            });
         }
         // Where a Minecraft folder can be copied to.
         let (row, i) = next(&mut y);
