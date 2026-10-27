@@ -211,6 +211,11 @@ impl AndroidGame {
         );
         let mut controls = load_controls(&home);
         controls.language = jni::platform("language", "").unwrap_or_default();
+        log::info!(
+            "Horizon: touch controls {}, layout {:?}",
+            if enabled { "on" } else { "off (Settings, Touch controls)" },
+            controls.layout.info.name.default.trim()
+        );
         let touch = TouchSettings {
             gestures: flag(&home, "touchGestures", false),
             gyroscope: flag(&home, "touchGyroscope", false),
