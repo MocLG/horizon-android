@@ -4,7 +4,7 @@ use super::launcher::Launcher;
 use crate::game::android::AndroidGame;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
 enum State {
@@ -63,7 +63,11 @@ impl ApplicationHandler for Shell {
             State::Game(g) => g.suspended(event_loop),
         }
     }
-    fn user_event(&mut self, _: &ActiveEventLoop, (): ()) {}
+    fn user_event(&mut self, _: &ActiveEventLoop, (): ()) {
+        if let State::Launcher(l) = &self.state {
+            l.request_redraw();
+        }
+    }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         match &mut self.state {
             State::Launcher(l) => l.window_event(event),
@@ -78,8 +82,7 @@ impl ApplicationHandler for Shell {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         match &mut self.state {
             State::Launcher(l) => {
-                l.about_to_wait();
-                event_loop.set_control_flow(ControlFlow::Poll);
+                l.about_to_wait(event_loop);
             }
             State::Game(g) => g.about_to_wait(event_loop),
         }
