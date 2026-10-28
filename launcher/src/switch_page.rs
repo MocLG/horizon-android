@@ -12,19 +12,21 @@ impl Launcher {
                 self.accounts
                     .selected()
                     .map_or_else(String::new, |a| a.name.clone()),
-                "Microsoft account",
+                tr("Microsoft account"),
             ),
-            Player::Offline(name) => (name, "Offline"),
+            Player::Offline(name) => (name, tr("Offline")),
             Player::GameName => (
                 self.offline_name.clone().unwrap_or_else(|| "Player".into()),
-                "Offline",
+                tr("Offline"),
             ),
         }
     }
 
     pub(super) fn play_as(&mut self, who: Player) {
         let mut accounts = Accounts::load();
-        let done = accounts.play_as(who).and_then(|()| accounts.save());
+        let done = accounts
+            .play_as(account::store(), who)
+            .and_then(|()| accounts.save());
         match done {
             Ok(()) => self.accounts = accounts,
             Err(e) => self.sign_in_state = Some(SignInState::Done(Err(e))),
@@ -42,7 +44,7 @@ impl Launcher {
                 (
                     Player::Microsoft(a.uuid.clone()),
                     a.name.clone(),
-                    "Microsoft",
+                    tr("Microsoft"),
                 )
             })
             .collect();
@@ -50,12 +52,12 @@ impl Launcher {
             self.accounts
                 .offline
                 .iter()
-                .map(|n| (Player::Offline(n.clone()), n.clone(), "Offline")),
+                .map(|n| (Player::Offline(n.clone()), n.clone(), tr("Offline"))),
         );
         out.push((
             Player::GameName,
             self.offline_name.clone().unwrap_or_else(|| "Player".into()),
-            "Offline, the game's name",
+            tr("Offline, the game's name"),
         ));
         out
     }
@@ -123,7 +125,7 @@ impl Launcher {
                 .text_color(t.muted)
                 .cursor_pointer()
                 .hover(move |s| s.bg(t.plate_soft).text_color(t.ink))
-                .child("Manage accounts")
+                .child(tr("Manage accounts"))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.account_menu = false;
                     this.go(Page::Settings);
@@ -196,11 +198,11 @@ impl Launcher {
                 name,
                 Some(
                     div()
-                        .child(if plays {
+                        .child(tr(if plays {
                             "Offline name · plays"
                         } else {
                             "Offline name"
-                        })
+                        }))
                         .into_any_element(),
                 ),
                 Some(actions.into_any_element()),
@@ -213,7 +215,7 @@ impl Launcher {
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(self.field(Field::OfflineName, "A name, 3 to 16 letters", 220., cx))
+            .child(self.field(Field::OfflineName, tr("A name, 3 to 16 letters"), 220., cx))
             .child(
                 button("offline-add", "Add", Kind::Secondary, &t).on_click(cx.listener(
                     |this, _: &ClickEvent, _, cx| {
@@ -224,13 +226,13 @@ impl Launcher {
             );
         rows = rows.child(index_row(
             n,
-            "Offline name",
+            tr("Offline name"),
             Some(
                 div()
-                    .child(
+                    .child(tr(
                         "Play offline under another name, and switch from the top bar. Online \
                          servers don't take offline names.",
-                    )
+                    ))
                     .into_any_element(),
             ),
             Some(add.into_any_element()),

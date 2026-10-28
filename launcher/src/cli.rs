@@ -79,7 +79,8 @@ enum ServersCmd {
 enum AccountCmd {
     /// The signed-in accounts and which one plays
     List,
-    /// Sign in with a Microsoft account in your browser (device code)
+    /// Sign in with a Microsoft account in your browser (device code). Play needs one that owns
+    /// Minecraft: Java Edition
     SignIn,
     /// Sign out: the account's tokens leave the keychain
     SignOut {
@@ -88,8 +89,9 @@ enum AccountCmd {
     },
     /// Play as this account, or as one of your offline names
     Select { who: String },
-    /// Play offline, without an account: as NAME (kept to switch back to; 3 to 16 letters,
-    /// digits or _), or as the name the game made up
+    /// Play offline (LAN, offline-mode servers) beside a signed-in account that owns the game:
+    /// as NAME (kept to switch back to; 3 to 16 letters, digits or _), or as the name the game
+    /// made up
     Offline { name: Option<String> },
     /// Forget one of your offline names
     ForgetOffline { name: String },
@@ -546,17 +548,21 @@ enum Cmd {
     Install { tag: String },
     /// Remove an installed version
     Remove { tag: String },
-    /// Prepare a version's resources from your own Minecraft install
+    /// Prepare a version's resources from your own Minecraft install, or from Mojang
     Prepare {
         /// The game folder of the official launcher, Prism Launcher, MultiMC, the Modrinth App,
         /// ATLauncher or GDLauncher (default: the launcher's, then every launcher's default)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "download")]
         minecraft: Option<PathBuf>,
+        /// Download Minecraft from Mojang for the signed-in account that owns it, instead of
+        /// using an install
+        #[arg(long)]
+        download: bool,
         /// The installed version (default: the selected one)
         #[arg(long)]
         version: Option<String>,
     },
-    /// Start the client
+    /// Start the client (needs a signed-in Microsoft account that owns Minecraft: Java Edition)
     Play {
         #[arg(long)]
         version: Option<String>,
@@ -603,7 +609,10 @@ enum Cmd {
     /// Show the launcher's settings, or set one (the Settings page): selected-version TAG,
     /// minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions
     /// on|off, opening-animation on|off, proxy http://host:port ("default" removes it),
-    /// while-playing stay|minimize|hide (what the window does while the game runs)
+    /// while-playing stay|minimize|hide (what the window does while the game runs), language
+    /// system|en|fr|ru (the window's language; system follows the computer's), accent
+    /// violet|blue|teal|green|amber|red|pink, background PATH (a picture behind Home; "default"
+    /// shows Horizon's landscape)
     Settings {
         #[arg(value_parser = SETTING_KEYS)]
         key: Option<String>,
@@ -740,7 +749,7 @@ pub fn command() -> clap::Command {
 pub const AI_COMMANDS: [&str; 2] = ["mcp", "agent-config"];
 
 /// The keys `settings` sets.
-const SETTING_KEYS: [&str; 7] = [
+const SETTING_KEYS: [&str; 10] = [
     "selected-version",
     "minecraft-dir",
     "server-dir",
@@ -748,6 +757,9 @@ const SETTING_KEYS: [&str; 7] = [
     "opening-animation",
     "proxy",
     "while-playing",
+    "language",
+    "accent",
+    "background",
 ];
 
 fn on_off(value: &str) -> Result<bool, String> {
@@ -769,6 +781,32 @@ fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(), 
         "while-playing" => {
             s.while_playing = backend::WhilePlaying::parse(value)
                 .ok_or_else(|| format!("{value}: say stay, minimize or hide"))?
+        }
+        "accent" => {
+            use horizon_launcher::themes::Accent;
+            s.accent = Accent::parse(value).ok_or_else(|| {
+                let names: Vec<_> = Accent::ALL.iter().map(|a| a.name()).collect();
+                format!("{value}: say {}", names.join(", "))
+            })?
+        }
+        "background" => {
+            s.background = match value.trim() {
+                "default" | "" => None,
+                file => Some(horizon_launcher::themes::keep_background(
+                    &backend::data_dir(),
+                    std::path::Path::new(file),
+                )?),
+            }
+        }
+        "language" => {
+            use horizon_launcher::i18n::Language;
+            s.language = match value.trim() {
+                "system" | "default" => None,
+                code => Some(
+                    Language::parse(code)
+                        .ok_or_else(|| format!("{value}: say system, en, fr or ru"))?,
+                ),
+            }
         }
         "proxy" => {
             if value == "default" || value.is_empty() {
@@ -796,6 +834,9 @@ fn settings_json(s: &backend::Settings) -> serde_json::Value {
         "proxy": s.proxy,
         "desktop_entry": s.desktop_entry.unwrap_or(true),
         "while_playing": s.while_playing.name(),
+        "language": s.language.map_or("system", |l| l.code()),
+        "accent": s.accent.name(),
+        "background": horizon_launcher::themes::background(&backend::data_dir(), s.background.as_deref()),
         "no_ai": backend::no_ai(),
     })
 }
@@ -937,11 +978,20 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
             backend::remove_version(&tag)?;
             println!("Removed {tag}.");
         }
-        Cmd::Prepare { minecraft, version } => {
+        Cmd::Prepare {
+            minecraft,
+            download,
+            version,
+        } => {
             let tag = backend::resolve_version(version.as_deref())?;
             let minecraft = backend::minecraft_dir(minecraft)?;
+            let from = if download {
+                backend::MinecraftFrom::Mojang
+            } else {
+                backend::MinecraftFrom::Install
+            };
             let (preparer, minecraft) =
-                backend::preparer(&tag, &minecraft, &|line| eprintln!("{line}"))?;
+                backend::preparer(&tag, &minecraft, from, &|line| eprintln!("{line}"))?;
             backend::sounds(&tag, &minecraft, &|line| println!("{line}"));
             match preparer {
                 backend::Preparer::Process(cmd) => attached(cmd)?,
@@ -1277,9 +1327,13 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                         "selected": accounts.player() == account::Player::Offline(n.clone()),
                     })).collect::<Vec<_>>(),
                     "sign_in_configured": account::client_id().is_some(),
+                    "owner": accounts.has_owner(account::store()),
                 }));
             } else if accounts.accounts.is_empty() && accounts.offline.is_empty() {
-                println!("No Microsoft account signed in: the game plays offline.");
+                println!(
+                    "No Microsoft account signed in. Play needs one that owns Minecraft: Java \
+                     Edition: horizon-launcher account sign-in"
+                );
             } else {
                 for a in &accounts.accounts {
                     let mark = if accounts.selected.as_ref() == Some(&a.uuid) {
@@ -1297,6 +1351,9 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                     println!(
                         "Playing offline as the game's own name (`account select NAME` to switch)."
                     );
+                }
+                if !accounts.has_owner(account::store()) {
+                    println!("{}.", account::NEEDS_OWNER);
                 }
             }
         }
@@ -1337,7 +1394,7 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                 ),
                 (None, None) => return Err(find(&accounts, &who).unwrap_err()),
             };
-            accounts.play_as(player)?;
+            accounts.play_as(account::store(), player)?;
             accounts.save()?;
             println!("The game plays as {name}.");
         }
@@ -1346,7 +1403,7 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                 Some(n) => account::Player::Offline(n),
                 None => account::Player::GameName,
             };
-            accounts.play_as(player)?;
+            accounts.play_as(account::store(), player)?;
             accounts.save()?;
             match accounts.name_arg() {
                 Some(n) => println!("The game plays offline as {n}."),
