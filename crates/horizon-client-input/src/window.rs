@@ -3,6 +3,13 @@
 //! `FramerateLimiter`, the vsync present-mode choice and the fullscreen
 //! request/state pair.
 
+/// The GUI's smallest width in GUI pixels, which caps the scale.
+pub const GUI_MIN_WIDTH: u32 = 320;
+/// The GUI's smallest height in GUI pixels, which caps the scale: vanilla's
+/// 240, which Horizon lowers on phones where its interface is larger (240 is
+/// about 3 mm text there). `horizon_client::hud` re-exports both.
+pub static GUI_MIN_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(240);
+
 /// `Window.calculateScale`: the largest scale that leaves at least 320x240
 /// GUI pixels, capped by `max_scale` (0 = automatic); an odd result is bumped
 /// to even when unicode is enforced.
@@ -12,9 +19,9 @@ pub fn calculate_scale(framebuffer: [i32; 2], max_scale: i32, enforce_unicode: b
     while scale != max_scale
         && scale < width
         && scale < height
-        && width / (scale + 1) >= crate::hud::GUI_MIN_WIDTH as i32
+        && width / (scale + 1) >= GUI_MIN_WIDTH as i32
         && height / (scale + 1)
-            >= crate::hud::GUI_MIN_HEIGHT.load(std::sync::atomic::Ordering::Relaxed) as i32
+            >= GUI_MIN_HEIGHT.load(std::sync::atomic::Ordering::Relaxed) as i32
     {
         scale += 1;
     }
