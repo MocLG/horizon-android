@@ -234,27 +234,39 @@ pub fn minecraft(paths: &Paths) -> Option<PathBuf> {
 /// must own Minecraft: Java Edition.
 fn download(paths: &Paths, pins: &sources::Pins, log: &dyn Fn(String)) -> Result<PathBuf, String> {
     let v = &pins.version;
-    let ep = account::Endpoints::live();
     let mut accounts = account::Accounts::load();
-    let Some((a, secrets)) = account::session_for_launch(&ep, account::store(), &mut accounts)?
-    else {
-        return Err(format!(
-            "Minecraft {v} isn't on this phone yet. Sign in with the Microsoft account that owns \
-             Minecraft: Java Edition and Horizon downloads it from Mojang, or copy a Minecraft \
-             folder that has {v} to {}.",
-            paths.copied_minecraft().display()
-        ));
+    let pass = account::launch(
+        &account::Endpoints::live(),
+        account::client_id().as_deref(),
+        account::store(),
+        &mut accounts,
+    );
+    let _ = accounts.save();
+    let who = match pass {
+        Ok(account::Launch {
+            owner: Some((owner, _)),
+            ..
+        }) => owner.name,
+        Ok(pass) => {
+            return Err(format!(
+                "Minecraft {v} isn't on this phone yet, and the account that owns it can't be \
+                 checked now: {}. Copy a Minecraft folder that has {v} to {}.",
+                pass.offline.unwrap_or_else(|| "no answer from Microsoft".into()),
+                paths.copied_minecraft().display()
+            ));
+        }
+        Err(refused) => {
+            return Err(format!(
+                "{refused} Sign in with the Microsoft account that owns Minecraft: Java Edition \
+                 and Horizon downloads {v} from Mojang, or copy a Minecraft folder that has {v} \
+                 to {}.",
+                paths.copied_minecraft().display()
+            ));
+        }
     };
-    if !account::owns_minecraft(&ep, &secrets)? {
-        return Err(format!(
-            "{}, the signed-in account, doesn't own Minecraft: Java Edition, so Horizon can't \
-             download it.",
-            a.name
-        ));
-    }
-    log(format!("{} owns Minecraft: downloading {v} from Mojang", a.name));
+    log(format!("{who} owns Minecraft: downloading {v} from Mojang"));
     let dir = paths.downloaded_minecraft();
-    mojang::download(pins, &dir, "linux", 8, &fetch, log)?;
+    mojang::download(pins, &dir, "linux", 8, &fetch, &mojang::CANCEL, log)?;
     Ok(dir)
 }
 
@@ -329,14 +341,14 @@ pub fn game_args(paths: &Paths) -> Result<Vec<String>, String> {
         "--resources".to_owned(),
         paths.resources().display().to_string(),
     ];
-    let mut accounts = account::Accounts::load();
-    if account::client_id().is_some()
-        && let Some((a, secrets)) =
-            account::session_for_launch(&account::Endpoints::live(), account::store(), &mut accounts)?
-    {
-        let file = account::write_session_file(&paths.home.join("sessions"), &a, &secrets)?;
-        args.push("--session-file".into());
-        args.push(file.display().to_string());
+    if account::client_id().is_some() {
+        let (session, _offline) = account::session_for_game(&paths.home).map_err(|refused| {
+            format!("{refused} Sign in with your Microsoft account in the launcher.")
+        })?;
+        if let Some(file) = session {
+            args.push("--session-file".into());
+            args.push(file.display().to_string());
+        }
     }
     Ok(args)
 }
