@@ -80,9 +80,6 @@ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 # DirectX 12 driver (`graphicsApi`, graphics.rs).
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 
-[target.'cfg(not(target_os = "android"))'.dependencies]
-arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
-
 [target.'cfg(target_os = "android")'.dependencies]
 # The NativeActivity behind the Android app (`src/android_main.rs`).
 winit = { version = "0.30.13", features = ["android-native-activity"] }
