@@ -105,15 +105,20 @@ fn send(request: ureq::Request, body: Option<Body>, service: &str) -> Result<(u1
     let response = match result {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
-        Err(ureq::Error::Transport(_)) => {
-            return Err(format!(
-                "Could not reach {service}. Check your internet connection."
-            ))
-        }
+        Err(ureq::Error::Transport(_)) => return Err(unreachable(service)),
     };
     let status = response.status();
     let text = response.into_string().unwrap_or_default();
     Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+}
+
+fn unreachable(service: &str) -> String {
+    format!("Could not reach {service}. Check your internet connection.")
+}
+
+/// Whether `error` is [`unreachable`]'s: the network, not an answer.
+fn is_unreachable(error: &str) -> bool {
+    error.starts_with("Could not reach ")
 }
 
 enum Body<'a> {
@@ -154,6 +159,7 @@ impl std::fmt::Debug for DeviceCode {
 }
 
 /// The Microsoft tokens; the access token only lasts for the Xbox step.
+#[derive(Clone)]
 pub struct MsTokens {
     access: String,
     refresh: String,
@@ -169,6 +175,9 @@ pub enum Poll {
     Pending,
     /// The server asked to poll less often: wait 5 s more.
     SlowDown,
+    /// Microsoft could not be reached this time: a phone cuts the network of an app behind the
+    /// browser, so the wait goes on.
+    Unreachable(String),
     Done(MsTokens),
 }
 
@@ -216,7 +225,7 @@ fn oauth_error(v: &Value) -> String {
 
 /// One poll of the token endpoint while the player signs in.
 pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll, String> {
-    let (status, v) = send(
+    let sent = send(
         request_to("POST", &format!("{}/token", ep.microsoft)),
         Some(Body::Form(vec![
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -224,7 +233,11 @@ pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll, 
             ("device_code", &code.device_code),
         ])),
         "Microsoft",
-    )?;
+    );
+    let (status, v) = match sent {
+        Ok(sent) => sent,
+        Err(e) => return Ok(Poll::Unreachable(e)),
+    };
     match v.get("error").and_then(Value::as_str) {
         Some("authorization_pending") => return Ok(Poll::Pending),
         Some("slow_down") => return Ok(Poll::SlowDown),
@@ -253,6 +266,7 @@ pub fn wait_for_sign_in(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<MsTokens, String> {
     let mut interval = code.interval;
+    let mut unreachable = None;
     loop {
         let until = std::time::Instant::now() + Duration::from_secs(interval);
         while std::time::Instant::now() < until {
@@ -262,11 +276,14 @@ pub fn wait_for_sign_in(
             std::thread::sleep(Duration::from_millis(100));
         }
         if now() > code.expires_at {
-            return Err("The sign-in code expired. Start again.".into());
+            return Err(
+                unreachable.unwrap_or_else(|| "The sign-in code expired. Start again.".into())
+            );
         }
         match poll(ep, client_id, code)? {
-            Poll::Pending => {}
+            Poll::Pending => unreachable = None,
             Poll::SlowDown => interval += 5,
+            Poll::Unreachable(e) => unreachable = Some(e),
             Poll::Done(tokens) => return Ok(tokens),
         }
     }
@@ -1210,7 +1227,22 @@ impl SignIn {
                 let ms = wait_for_sign_in(&ep, &client_id, &code, &|| {
                     thread_cancel.load(Ordering::Relaxed)
                 })?;
-                let (account, secrets) = finish_sign_in(&ep, ms)?;
+                // The browser may still be in front, with the network cut: try again a while.
+                let mut tries = 0;
+                let (account, secrets) = loop {
+                    match finish_sign_in(&ep, ms.clone()) {
+                        Err(e) if is_unreachable(&e) && tries < 24 => {
+                            tries += 1;
+                            for _ in 0..50 {
+                                if thread_cancel.load(Ordering::Relaxed) {
+                                    return Err("Sign-in cancelled.".into());
+                                }
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                        }
+                        done => break done?,
+                    }
+                };
                 let mut accounts = Accounts::load();
                 accounts.add(store(), account.clone(), &secrets)?;
                 accounts.save()?;
