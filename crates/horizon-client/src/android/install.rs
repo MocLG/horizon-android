@@ -216,9 +216,11 @@ pub fn unpack_app(app: &AndroidApp, paths: &Paths, log: &dyn Fn(String)) -> Resu
 }
 
 fn pins(paths: &Paths) -> Result<sources::Pins, String> {
-    let lock = fs::read_to_string(paths.root.join("research-lock.json")).map_err(|e| e.to_string())?;
+    let lock =
+        fs::read_to_string(paths.root.join("research-lock.json")).map_err(|e| e.to_string())?;
     let lock: serde_json::Value = serde_json::from_str(&lock).map_err(|e| e.to_string())?;
-    sources::Pins::read(&lock).ok_or_else(|| "research-lock.json doesn't pin the Minecraft files".into())
+    sources::Pins::read(&lock)
+        .ok_or_else(|| "research-lock.json doesn't pin the Minecraft files".into())
 }
 
 /// The Minecraft folder holding the pinned version: a copied one, or the
@@ -251,7 +253,8 @@ fn download(paths: &Paths, pins: &sources::Pins, log: &dyn Fn(String)) -> Result
             return Err(format!(
                 "Minecraft {v} isn't on this phone yet, and the account that owns it can't be \
                  checked now: {}. Copy a Minecraft folder that has {v} to {}.",
-                pass.offline.unwrap_or_else(|| "no answer from Microsoft".into()),
+                pass.offline
+                    .unwrap_or_else(|| "no answer from Microsoft".into()),
                 paths.copied_minecraft().display()
             ));
         }
@@ -323,7 +326,8 @@ pub fn install(app: &AndroidApp, paths: &Paths, log: &dyn Fn(String)) -> Result<
     log("Preparing Horizon's resources (this takes a few minutes)".into());
     horizon_prepare::prepare(&options, &|line| log(line.into()))?;
     log("Copying the sounds".into());
-    if let Err(e) = horizon_prepare::sounds(&paths.root, Some(&minecraft), &|line| log(line.into())) {
+    if let Err(e) = horizon_prepare::sounds(&paths.root, Some(&minecraft), &|line| log(line.into()))
+    {
         log(format!("The game will be silent: {e}"));
     }
     fs::write(
@@ -342,9 +346,10 @@ pub fn game_args(paths: &Paths) -> Result<Vec<String>, String> {
         paths.resources().display().to_string(),
     ];
     if account::client_id().is_some() {
-        let (session, _offline) = account::session_for_game(&paths.home).map_err(|refused| {
-            format!("{refused} Sign in with your Microsoft account in the launcher.")
-        })?;
+        let (session, _offline) =
+            account::session_for_game(&paths.home, false).map_err(|refused| {
+                format!("{refused} Sign in with your Microsoft account in the launcher.")
+            })?;
         if let Some(file) = session {
             args.push("--session-file".into());
             args.push(file.display().to_string());
