@@ -1,10 +1,10 @@
 //! The launcher, as the desktop one looks (`launcher/`, `docs/design-system.md`):
 //! the Play page with the account, the game files and Play, and Settings.
 //! Drawn in the game's window before the game takes it over.
+use super::controls;
 use super::draw::{Face, Rect, Renderer, hex};
 use super::install::{self, Paths, Task};
 use super::jni;
-use super::controls;
 use super::ui::{CONTROL, GUTTER, Pointer, ROW, Ui};
 use super::update::{self, Release};
 use crate::account;
@@ -97,7 +97,9 @@ impl Launcher {
             play: None,
         };
         // The app's own files first, so the version folder is there to read.
-        launcher.run("Unpacking", |app, paths, log| install::unpack_app(app, paths, log));
+        launcher.run("Unpacking", |app, paths, log| {
+            install::unpack_app(app, paths, log)
+        });
         launcher
     }
 
@@ -151,7 +153,10 @@ impl Launcher {
     }
 
     pub fn window_event(&mut self, event: WindowEvent) {
-        let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+        let scale = self
+            .window
+            .as_ref()
+            .map_or(1.0, |w| w.scale_factor() as f32);
         match event {
             WindowEvent::Resized(size) => {
                 self.insets = None;
@@ -250,10 +255,11 @@ impl Launcher {
             match sign_in.state() {
                 account::SignInState::Code(code) if !self.opened_code => {
                     self.opened_code = true;
-                    jni::open_url(&format!(
-                        "{}?otc={}",
-                        code.verification_uri, code.user_code
-                    ));
+                    // The page itself: with the code in its address (`?otc=`) Microsoft
+                    // refuses the sign in as a first party application's.
+                    jni::platform("clipboard_set", &code.user_code);
+                    jni::platform("toast", "The code is copied. Paste it on the page.");
+                    jni::open_url(&code.verification_uri);
                 }
                 account::SignInState::Done(result) => {
                     if let Err(e) = result {
@@ -364,7 +370,11 @@ impl Launcher {
 
     /// Returns the page's height.
     fn play_page(&mut self, ui: &mut Ui, r: Rect, mut y: f32) -> f32 {
-        let caption = format!("Minecraft {} · {}", horizon_core::VANILLA_VERSION, self.status());
+        let caption = format!(
+            "Minecraft {} · {}",
+            horizon_core::VANILLA_VERSION,
+            self.status()
+        );
         ui.text(r.x, y, &caption, Face::Regular, 12.0, hex(P.muted, 1.0));
         y += 20.0;
         let display = 44.0;
@@ -415,7 +425,9 @@ impl Launcher {
                 110.0,
             );
             if ui.row_button(row, "Update", true, !self.busy()) {
-                self.run("Updating", move |_, paths, log| update::install(&release, paths, log));
+                self.run("Updating", move |_, paths, log| {
+                    update::install(&release, paths, log)
+                });
             }
             y += ROW;
         }
@@ -438,7 +450,9 @@ impl Launcher {
         // 02 the game files.
         let row = Rect::new(r.x, y, r.w, ROW);
         let detail = match self.minecraft() {
-            Some(dir) if dir == self.paths.copied_minecraft() => "From the Minecraft folder you copied to this phone.".to_owned(),
+            Some(dir) if dir == self.paths.copied_minecraft() => {
+                "From the Minecraft folder you copied to this phone.".to_owned()
+            }
             Some(_) => "Downloaded from Mojang for your account.".to_owned(),
             None => format!(
                 "Not on this phone yet. Signing in downloads it, or copy a Minecraft folder with {} to {}.",
@@ -446,12 +460,21 @@ impl Launcher {
                 self.paths.copied_minecraft().display()
             ),
         };
-        ui.row(row, 2, &format!("Minecraft {}", horizon_core::VANILLA_VERSION), &detail, 110.0);
+        ui.row(
+            row,
+            2,
+            &format!("Minecraft {}", horizon_core::VANILLA_VERSION),
+            &detail,
+            110.0,
+        );
         y += ROW;
         // 03 the resources, prepared from them.
         let row = Rect::new(r.x, y, r.w, ROW);
         let (detail, label) = if self.paths.prepared() {
-            ("Prepared. Horizon built them from your own Minecraft.", "Prepare again")
+            (
+                "Prepared. Horizon built them from your own Minecraft.",
+                "Prepare again",
+            )
         } else {
             (
                 "Not prepared. Horizon builds them from the files of your own Minecraft, once.",
@@ -470,9 +493,10 @@ impl Launcher {
 
     /// The Minecraft folder, looked for again every few seconds and after a task.
     fn minecraft(&mut self) -> Option<std::path::PathBuf> {
-        let stale = self.minecraft.as_ref().is_none_or(|(_, at)| {
-            at.elapsed() > std::time::Duration::from_secs(5)
-        });
+        let stale = self
+            .minecraft
+            .as_ref()
+            .is_none_or(|(_, at)| at.elapsed() > std::time::Duration::from_secs(5));
         if stale && !self.busy() {
             self.minecraft = Some((install::minecraft(&self.paths), Instant::now()));
         }
@@ -481,7 +505,9 @@ impl Launcher {
 
     fn prepare(&mut self) {
         let _ = std::fs::remove_file(self.paths.root.join(".local").join("prepared-by-app"));
-        self.run("Installing", |app, paths, log| install::install(app, paths, log));
+        self.run("Installing", |app, paths, log| {
+            install::install(app, paths, log)
+        });
     }
 
     fn task_and_error(&mut self, ui: &mut Ui, r: Rect, mut y: f32) -> f32 {
@@ -526,7 +552,14 @@ impl Launcher {
         ui.c.rect(d, horizon_theme::RADIUS_PLATE, hex(P.surface, 1.0));
         let x = d.x + 24.0;
         let mut y = d.y + 22.0;
-        ui.text(x, y, "Sign in with Microsoft", Face::Medium, 20.0, hex(P.ink, 1.0));
+        ui.text(
+            x,
+            y,
+            "Sign in with Microsoft",
+            Face::Medium,
+            20.0,
+            hex(P.ink, 1.0),
+        );
         y += 34.0;
         let code = match &state {
             account::SignInState::Code(code) => Some(code.clone()),
@@ -541,7 +574,14 @@ impl Launcher {
                 y += 54.0;
             }
             None => {
-                ui.text(x, y, "Asking Microsoft for a code…", Face::Regular, 13.0, hex(P.muted, 1.0));
+                ui.text(
+                    x,
+                    y,
+                    "Asking Microsoft for a code…",
+                    Face::Regular,
+                    13.0,
+                    hex(P.muted, 1.0),
+                );
                 y += 80.0;
             }
         }
@@ -550,7 +590,8 @@ impl Launcher {
             let label = "Open the page";
             let bw = ui.button_width(label);
             if ui.button(Rect::new(bx, y, bw, CONTROL), label, true, true) {
-                jni::open_url(&format!("{}?otc={}", code.verification_uri, code.user_code));
+                jni::platform("clipboard_set", &code.user_code);
+                jni::open_url(&code.verification_uri);
             }
             bx += bw + 8.0;
             let label = "Copy code";
@@ -573,7 +614,14 @@ impl Launcher {
     fn settings_page(&mut self, ui: &mut Ui, r: Rect, mut y: f32) -> f32 {
         ui.text(r.x, y, "Settings", Face::Medium, 44.0, hex(P.ink, 1.0));
         y += ui.c.line(Face::Medium, 44.0) + 4.0;
-        ui.text(r.x, y, "Your account, the controls and the game's files.", Face::Regular, 14.0, hex(P.muted, 1.0));
+        ui.text(
+            r.x,
+            y,
+            "Your account, the controls and the game's files.",
+            Face::Regular,
+            14.0,
+            hex(P.muted, 1.0),
+        );
         y += 34.0;
         ui.c.rule(r.x, y, r.w, hex(P.rule, 1.0));
         let mut index = 0;
@@ -587,17 +635,32 @@ impl Launcher {
         let (row, i) = next(&mut y);
         match self.signed_in().cloned() {
             Some(a) => {
-                ui.row(row, i, "Microsoft account", &format!("Signed in as {}.", a.name), 110.0);
+                ui.row(
+                    row,
+                    i,
+                    "Microsoft account",
+                    &format!("Signed in as {}.", a.name),
+                    110.0,
+                );
                 if ui.row_button(row, "Sign out", false, true) {
                     let mut accounts = account::Accounts::load();
-                    if let Err(e) = accounts.remove(account::store(), &a.uuid).and_then(|_| accounts.save()) {
+                    if let Err(e) = accounts
+                        .remove(account::store(), &a.uuid)
+                        .and_then(|_| accounts.save())
+                    {
                         self.error = Some(e);
                     }
                     self.accounts = account::Accounts::load();
                 }
             }
             None => {
-                ui.row(row, i, "Microsoft account", "Not signed in: the game plays offline.", 110.0);
+                ui.row(
+                    row,
+                    i,
+                    "Microsoft account",
+                    "Not signed in: the game plays offline.",
+                    110.0,
+                );
                 if ui.row_button(row, "Sign in", false, self.sign_in.is_none()) {
                     self.start_sign_in();
                 }
@@ -609,7 +672,9 @@ impl Launcher {
         let detail = match (&self.editing, account::client_id()) {
             (Some(e), _) => format!("{}|", e.text),
             (None, Some(id)) => id,
-            (None, None) => "Not set. Sign-in needs the client ID of an Azure app Mojang approved.".into(),
+            (None, None) => {
+                "Not set. Sign-in needs the client ID of an Azure app Mojang approved.".into()
+            }
         };
         ui.row(row, i, "Azure client ID", &detail, 90.0);
         if editing {
@@ -636,14 +701,23 @@ impl Launcher {
         );
         if let Some(on) = ui.switch(row, self.touch) {
             self.touch = on;
-            set_preference(&self.paths.home, "touchControls", if on { "true" } else { "false" });
+            set_preference(
+                &self.paths.home,
+                "touchControls",
+                if on { "true" } else { "false" },
+            );
         }
         // The control layout, and Zalith Launcher 2's layouts in and out.
         let (row, i) = next(&mut y);
         let layouts = controls::layouts(&self.paths.home);
         let current = controls::selected(&self.paths.home);
-        let index = layouts.iter().position(|(file, _)| *file == current).unwrap_or(0);
-        let name = layouts.get(index).map_or("Default", |(_, name)| name.as_str());
+        let index = layouts
+            .iter()
+            .position(|(file, _)| *file == current)
+            .unwrap_or(0);
+        let name = layouts
+            .get(index)
+            .map_or("Default", |(_, name)| name.as_str());
         ui.row(
             row,
             i,
@@ -662,13 +736,18 @@ impl Launcher {
             i,
             "Import and export layouts",
             &format!(
-                "Zalith Launcher 2's layouts work as they are: copy their .json files to {}, then Import. Export puts the current layout there.",
+                "Zalith Launcher 2's layouts work as they are: copy their .json files to {}, then Import. Export puts all your layouts there.",
                 folder.display()
             ),
             190.0,
         );
         let export = ui.button_width("Export");
-        let import_rect = Rect::new(row.right() - export - 8.0 - ui.button_width("Import"), row.y + (row.h - CONTROL) / 2.0, ui.button_width("Import"), CONTROL);
+        let import_rect = Rect::new(
+            row.right() - export - 8.0 - ui.button_width("Import"),
+            row.y + (row.h - CONTROL) / 2.0,
+            ui.button_width("Import"),
+            CONTROL,
+        );
         if ui.button(import_rect, "Import", false, true) {
             self.error = Some(match controls::import(&folder, &self.paths.home) {
                 Ok(0) => format!("No layouts to import in {}.", folder.display()),
@@ -678,7 +757,43 @@ impl Launcher {
         }
         if ui.row_button(row, "Export", false, true) {
             self.error = Some(match controls::export(&self.paths.home, &folder) {
-                Ok(file) => format!("Exported to {}.", file.display()),
+                Ok(n) => format!("Exported {n} control layouts to {}.", folder.display()),
+                Err(e) => e,
+            });
+        }
+        // The touch settings, backed up beside the layouts.
+        let (row, i) = next(&mut y);
+        let file = folder.join("horizon-settings.txt");
+        ui.row(
+            row,
+            i,
+            "Back up touch settings",
+            &format!(
+                "Export writes the controls' size and opacity, gestures, the gyroscope, the menu ball, the interface and debug screen sizes and the chosen layout to {}. Import reads them back.",
+                file.display()
+            ),
+            190.0,
+        );
+        let import_rect = Rect::new(
+            row.right() - export - 8.0 - ui.button_width("Import"),
+            row.y + (row.h - CONTROL) / 2.0,
+            ui.button_width("Import"),
+            CONTROL,
+        );
+        if ui.button(import_rect, "Import", false, true) {
+            self.error = Some(match controls::import_settings(&file, &self.paths.home) {
+                Ok(n) => {
+                    self.touch =
+                        horizon_client::ui_theme::preference(&self.paths.home, "touchControls")
+                            .is_none_or(|v| v != "false");
+                    format!("Imported {n} touch settings.")
+                }
+                Err(e) => e,
+            });
+        }
+        if ui.row_button(row, "Export", false, true) {
+            self.error = Some(match controls::export_settings(&self.paths.home, &file) {
+                Ok(n) => format!("Exported {n} touch settings to {}.", file.display()),
                 Err(e) => e,
             });
         }
@@ -697,7 +812,13 @@ impl Launcher {
         );
         // Preparing again.
         let (row, i) = next(&mut y);
-        ui.row(row, i, "Resources", "Prepare them again from your Minecraft, for example after it changed.", 140.0);
+        ui.row(
+            row,
+            i,
+            "Resources",
+            "Prepare them again from your Minecraft, for example after it changed.",
+            140.0,
+        );
         if ui.row_button(row, "Prepare again", false, !self.busy()) {
             self.prepare();
             self.page = Page::Play;
