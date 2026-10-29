@@ -55,11 +55,12 @@ joystick, which locks forward and sprints when pushed past its top.
 - A gamepad plays with Horizon's controller support, and layers set to hide
   for one do while it is in use.
 
-Layouts exported from Zalith Launcher 2 load as they are. Copy their `.json`
-files to `Android/data/com.lukagejak.horizon/files/controls` and press
-Import in Settings, then pick one with Next. Export writes the current
-layout there for Zalith or another phone. Settings also turns the touch
-controls off for a keyboard or a controller.
+Layouts exported from Zalith Launcher 2 load as they are. Import in
+Settings opens Android's file picker on them, then Next picks one. Export
+saves the current layout where you choose, for Zalith or another phone.
+The touch settings back up the same way, to a `horizon-settings.txt` that
+Import reads back. Settings also turns the touch controls off for a
+keyboard or a controller.
 
 ## How it is built
 
