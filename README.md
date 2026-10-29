@@ -32,7 +32,7 @@ Horizon is Minecraft: Java Edition 26.3 rewritten in Rust: a native game that re
 This repository is the Android port of Horizon: the same Rust game, built for Android, behind a launcher that looks like the desktop one. It runs on an arm64 phone or tablet with Vulkan and Android 10 or newer.
 
 1. Download the APK from [the latest release](https://github.com/MocLG/horizon-android/releases/latest) and install it.
-2. Get Minecraft 26.3 onto the phone. Signing in with the Microsoft account that owns Minecraft: Java Edition lets the launcher download it, once Mojang has approved the app's sign in. Until then, copy a Minecraft folder with 26.3 (`versions/26.3`, `libraries` and `assets`) to `Android/data/com.lukagejak.horizon/files/minecraft` over USB.
+2. Get Minecraft 26.3 onto the phone. Signing in with the Microsoft account that owns Minecraft: Java Edition lets the launcher download it. You can also copy a Minecraft folder with 26.3 (`versions/26.3`, `libraries` and `assets`) to `Android/data/com.lukagejak.horizon/files/minecraft` over USB.
 3. Press Install. The launcher prepares the resources once, on the phone, with a Java runtime it carries. It takes a few minutes, so keep the app on screen while it runs.
 4. Press Play.
 
