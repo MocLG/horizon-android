@@ -1,7 +1,7 @@
 //! The player's control layouts, in Zalith Launcher 2's format
 //! (`horizon_client::controls`): kept in the game folder's `controls/`, picked
-//! by `controlLayout` in horizon.txt, and copied in and out through a folder
-//! a computer reaches over USB, as is a backup of the touch settings.
+//! by `controlLayout` in horizon.txt, and imported and exported through
+//! Android's file picker, as is a backup of the touch settings.
 use horizon_client::controls::layout::Layout;
 use std::fs;
 use std::path::Path;
@@ -34,70 +34,59 @@ pub fn selected(home: &Path) -> String {
     horizon_client::ui_theme::preference(home, "controlLayout").unwrap_or_default()
 }
 
-/// Copies the layouts in `from` that read as one into the game folder;
-/// returns how many.
-pub fn import(from: &Path, home: &Path) -> Result<usize, String> {
-    let entries = match fs::read_dir(from) {
-        Ok(entries) => entries,
-        Err(_) => {
-            fs::create_dir_all(from).map_err(|e| e.to_string())?;
-            return Ok(0);
-        }
-    };
-    let to = home.join("controls");
-    fs::create_dir_all(&to).map_err(|e| e.to_string())?;
-    let mut count = 0;
-    let mut problems = Vec::new();
-    for path in entries.flatten().map(|e| e.path()) {
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        match fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|json| Layout::parse(&json).map(|_| json))
-        {
-            Ok(json) => {
-                fs::write(to.join(&name), json).map_err(|e| e.to_string())?;
-                count += 1;
+/// The marker on the first line of a settings backup.
+const SETTINGS_HEADER: &str = "# Horizon for Android: touch settings";
+
+/// What a picked file imported as.
+pub enum Imported {
+    Layout(String),
+    Settings(usize),
+}
+
+/// Imports a picked file: a settings backup, or a layout in Zalith Launcher
+/// 2's format, kept in the game folder under the file's own name.
+pub fn import(name: &str, text: &str, home: &Path) -> Result<Imported, String> {
+    if text.starts_with(SETTINGS_HEADER) {
+        return import_settings(text, home).map(Imported::Settings);
+    }
+    let layout = Layout::parse(text).map_err(|e| format!("{name}: {e}"))?;
+    let stem: String = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("layout")
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
             }
-            Err(e) => problems.push(format!("{name}: {e}")),
-        }
-    }
-    if count == 0 && !problems.is_empty() {
-        return Err(format!("No layout could be read. {}", problems.join(" ")));
-    }
-    Ok(count)
+        })
+        .collect();
+    let dir = home.join("controls");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(dir.join(format!("{stem}.json")), text).map_err(|e| e.to_string())?;
+    let shown = layout.info.name.default.trim();
+    Ok(Imported::Layout(if shown.is_empty() {
+        stem
+    } else {
+        shown.to_owned()
+    }))
 }
 
-/// Writes every layout of the game folder to `to`, the default too when it is
-/// the one chosen, for Zalith Launcher 2 or another phone; returns how many.
-pub fn export(home: &Path, to: &Path) -> Result<usize, String> {
-    fs::create_dir_all(to).map_err(|e| e.to_string())?;
-    let mut count = 0;
-    if selected(home).is_empty() {
-        fs::write(
-            to.join("horizon-default.json"),
-            horizon_client::controls::DEFAULT_LAYOUT,
-        )
+/// The chosen layout, for Zalith Launcher 2 or another phone: its file name and text.
+pub fn export(home: &Path) -> Result<(String, String), String> {
+    let stem = selected(home);
+    if stem.is_empty() {
+        return Ok((
+            "horizon-default.json".into(),
+            horizon_client::controls::DEFAULT_LAYOUT.to_owned(),
+        ));
+    }
+    let json = fs::read_to_string(home.join("controls").join(format!("{stem}.json")))
         .map_err(|e| e.to_string())?;
-        count += 1;
-    }
-    for (stem, _) in layouts(home)
-        .into_iter()
-        .filter(|(stem, _)| !stem.is_empty())
-    {
-        let name = format!("{stem}.json");
-        fs::copy(home.join("controls").join(&name), to.join(&name)).map_err(|e| e.to_string())?;
-        count += 1;
-    }
-    Ok(count)
+    Ok((format!("{stem}.json"), json))
 }
-
 /// The touch settings a backup carries: horizon.txt's, then options.txt's.
 const SETTINGS: [&str; 8] = [
     "touchControls",
@@ -112,9 +101,11 @@ const SETTINGS: [&str; 8] = [
 const OPTIONS: [&str; 2] = ["guiScale", "debugGuiScale"];
 
 fn read(file: &Path) -> Vec<(String, String)> {
-    fs::read_to_string(file)
-        .unwrap_or_default()
-        .lines()
+    parse(&fs::read_to_string(file).unwrap_or_default())
+}
+
+fn parse(text: &str) -> Vec<(String, String)> {
+    text.lines()
         .filter_map(|l| {
             let (k, v) = l.split_once(':')?;
             Some((k.trim().to_owned(), v.trim().to_owned()))
@@ -134,34 +125,25 @@ fn write_option(file: &Path, key: &str, value: &str) -> Result<(), String> {
     fs::write(file, lines.join("\n") + "\n").map_err(|e| e.to_string())
 }
 
-/// Writes the touch settings to `file`: the controls' size and opacity,
-/// gestures, the gyroscope, the menu ball, the interface, the debug screen's
-/// size and the layout chosen.
-pub fn export_settings(home: &Path, file: &Path) -> Result<usize, String> {
+/// The touch settings as a backup: the controls' size and opacity, gestures,
+/// the gyroscope, the menu ball, the interface, the GUI and debug screen
+/// scales and the layout chosen.
+pub fn export_settings(home: &Path) -> String {
     let ours = read(&home.join("horizon.txt"));
     let options = read(&home.join("options.txt"));
-    let mut out = String::from("# Horizon for Android: touch settings\n");
-    let mut count = 0;
+    let mut out = format!("{SETTINGS_HEADER}\n");
     for (keys, from) in [(&SETTINGS[..], &ours), (&OPTIONS[..], &options)] {
         for (k, v) in from.iter().filter(|(k, _)| keys.contains(&k.as_str())) {
             out.push_str(&format!("{k}:{v}\n"));
-            count += 1;
         }
     }
-    if let Some(dir) = file.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    fs::write(file, out).map_err(|e| e.to_string())?;
-    Ok(count)
+    out
 }
 
-/// Reads touch settings `export_settings` wrote back into the game folder.
-pub fn import_settings(file: &Path, home: &Path) -> Result<usize, String> {
-    if !file.exists() {
-        return Err(format!("No settings to import at {}.", file.display()));
-    }
+/// Reads a backup `export_settings` wrote back into the game folder.
+fn import_settings(text: &str, home: &Path) -> Result<usize, String> {
     let mut count = 0;
-    for (k, v) in read(file) {
+    for (k, v) in parse(text) {
         if SETTINGS.contains(&k.as_str()) {
             horizon_client::ui_theme::set_preference(home, &k, Some(&v));
         } else if OPTIONS.contains(&k.as_str()) {

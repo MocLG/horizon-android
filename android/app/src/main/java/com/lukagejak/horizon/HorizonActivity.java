@@ -51,10 +51,18 @@ public class HorizonActivity extends NativeActivity {
     /** The soft keyboard showed or hid, whoever asked it to. */
     static native void nativeKeyboard(boolean shown);
 
+    /** A file the player picked to import: its name and its text. */
+    static native void nativePicked(String name, String text);
+
     /** The phone turned by (x, y) radians since the last call: the gyroscope's look. */
     static native void nativeGyro(float x, float y);
 
+    private static final int SAVE_DOCUMENT = 1;
+    private static final int OPEN_DOCUMENTS = 2;
+
     private TextSink sink;
+    /** The text an export writes where the player picks. */
+    private String toSave;
     private boolean keyboardShown;
     private SensorEventListener gyroscope;
 
@@ -179,6 +187,17 @@ public class HorizonActivity extends NativeActivity {
                         == android.content.res.Configuration.UI_MODE_NIGHT_YES ? "1" : "0";
             case "language":
                 return java.util.Locale.getDefault().toLanguageTag();
+            case "save_document": {
+                // The suggested file name, a new line, then the text.
+                int cut = arg.indexOf('\n');
+                String name = arg.substring(0, cut);
+                String text = arg.substring(cut + 1);
+                runOnUiThread(() -> saveDocument(name, text));
+                return null;
+            }
+            case "open_documents":
+                runOnUiThread(this::openDocuments);
+                return null;
             case "version_code":
                 try {
                     return Long.toString(getPackageManager()
@@ -261,6 +280,80 @@ public class HorizonActivity extends NativeActivity {
         }
         return cutout.getSafeInsetLeft() + "," + cutout.getSafeInsetTop() + ","
                 + cutout.getSafeInsetRight() + "," + cutout.getSafeInsetBottom();
+    }
+
+    /** Asks where to save `text`, Downloads or anywhere else, then writes it there. */
+    private void saveDocument(String name, String text) {
+        toSave = text;
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(name.endsWith(".json") ? "application/json" : "text/plain")
+                .putExtra(Intent.EXTRA_TITLE, name);
+        startActivityForResult(intent, SAVE_DOCUMENT);
+    }
+
+    /** Lets the player pick files to import, which go to the game as text. */
+    private void openDocuments() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        startActivityForResult(intent, OPEN_DOCUMENTS);
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (result != RESULT_OK || data == null) {
+            return;
+        }
+        if (request == SAVE_DOCUMENT && data.getData() != null && toSave != null) {
+            try (java.io.OutputStream out =
+                    getContentResolver().openOutputStream(data.getData(), "wt")) {
+                out.write(toSave.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show();
+            } catch (java.io.IOException | RuntimeException e) {
+                Toast.makeText(this, "Not saved: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            }
+            toSave = null;
+        } else if (request == OPEN_DOCUMENTS) {
+            java.util.List<Uri> uris = new java.util.ArrayList<>();
+            if (data.getClipData() != null) {
+                for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                    uris.add(data.getClipData().getItemAt(i).getUri());
+                }
+            } else if (data.getData() != null) {
+                uris.add(data.getData());
+            }
+            for (Uri uri : uris) {
+                try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                    // Layouts and settings are small: anything larger is not one.
+                    byte[] bytes = new byte[4 << 20];
+                    int length = 0;
+                    for (int n; length < bytes.length
+                            && (n = in.read(bytes, length, bytes.length - length)) > 0; ) {
+                        length += n;
+                    }
+                    nativePicked(displayName(uri),
+                            new String(bytes, 0, length, java.nio.charset.StandardCharsets.UTF_8));
+                } catch (java.io.IOException | RuntimeException e) {
+                    nativePicked(displayName(uri), "");
+                }
+            }
+        }
+    }
+
+    private String displayName(Uri uri) {
+        try (android.database.Cursor c = getContentResolver().query(uri,
+                new String[] {android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                return c.getString(0);
+            }
+        } catch (RuntimeException e) {
+            // The file's name only labels it.
+        }
+        String last = uri.getLastPathSegment();
+        return last == null ? "file" : last;
     }
 
     /** Opens Android's installer on the downloaded update, or its setting to allow it first. */

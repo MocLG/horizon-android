@@ -227,6 +227,28 @@ impl Launcher {
         }
     }
 
+    /// Files picked to import: layouts and settings backups.
+    fn picked(&mut self) {
+        let picked = jni::take_picked();
+        if picked.is_empty() {
+            return;
+        }
+        let mut done = Vec::new();
+        for (name, text) in picked {
+            done.push(match controls::import(&name, &text, &self.paths.home) {
+                Ok(controls::Imported::Layout(layout)) => format!("Imported the layout {layout}."),
+                Ok(controls::Imported::Settings(n)) => {
+                    self.touch =
+                        horizon_client::ui_theme::preference(&self.paths.home, "touchControls")
+                            .is_none_or(|v| v != "false");
+                    format!("Imported {n} touch settings.")
+                }
+                Err(e) => e,
+            });
+        }
+        self.error = Some(done.join(" "));
+    }
+
     fn save_client_id(&mut self, id: &str) {
         let path = crate::backend::data_dir().join("client-id.txt");
         let _ = std::fs::create_dir_all(crate::backend::data_dir());
@@ -242,6 +264,7 @@ impl Launcher {
 
     pub fn about_to_wait(&mut self) {
         self.typed();
+        self.picked();
         if let Some(task) = &self.task
             && let Some(done) = task.progress().done
         {
@@ -730,15 +753,11 @@ impl Launcher {
             set_preference(&self.paths.home, "controlLayout", file);
         }
         let (row, i) = next(&mut y);
-        let folder = self.paths.shared.join("controls");
         ui.row(
             row,
             i,
             "Import and export layouts",
-            &format!(
-                "Zalith Launcher 2's layouts work as they are: copy their .json files to {}, then Import. Export puts all your layouts there.",
-                folder.display()
-            ),
+            "Zalith Launcher 2's layouts work as they are. Import picks layout files, or a settings backup, from Downloads or anywhere. Export saves the chosen layout where you pick.",
             190.0,
         );
         let export = ui.button_width("Export");
@@ -749,29 +768,21 @@ impl Launcher {
             CONTROL,
         );
         if ui.button(import_rect, "Import", false, true) {
-            self.error = Some(match controls::import(&folder, &self.paths.home) {
-                Ok(0) => format!("No layouts to import in {}.", folder.display()),
-                Ok(n) => format!("Imported {n} control layouts."),
-                Err(e) => e,
-            });
+            jni::platform("open_documents", "");
         }
         if ui.row_button(row, "Export", false, true) {
-            self.error = Some(match controls::export(&self.paths.home, &folder) {
-                Ok(n) => format!("Exported {n} control layouts to {}.", folder.display()),
-                Err(e) => e,
-            });
+            match controls::export(&self.paths.home) {
+                Ok((name, json)) => jni::save_document(&name, &json),
+                Err(e) => self.error = Some(e),
+            }
         }
         // The touch settings, backed up beside the layouts.
         let (row, i) = next(&mut y);
-        let file = folder.join("horizon-settings.txt");
         ui.row(
             row,
             i,
             "Back up touch settings",
-            &format!(
-                "Export writes the controls' size and opacity, gestures, the gyroscope, the menu ball, the interface and debug screen sizes and the chosen layout to {}. Import reads them back.",
-                file.display()
-            ),
+            "Export saves the controls' size and opacity, gestures, the gyroscope, the menu ball, the interface and debug screen sizes and the chosen layout where you pick. Import reads the file back.",
             190.0,
         );
         let import_rect = Rect::new(
@@ -781,21 +792,13 @@ impl Launcher {
             CONTROL,
         );
         if ui.button(import_rect, "Import", false, true) {
-            self.error = Some(match controls::import_settings(&file, &self.paths.home) {
-                Ok(n) => {
-                    self.touch =
-                        horizon_client::ui_theme::preference(&self.paths.home, "touchControls")
-                            .is_none_or(|v| v != "false");
-                    format!("Imported {n} touch settings.")
-                }
-                Err(e) => e,
-            });
+            jni::platform("open_documents", "");
         }
         if ui.row_button(row, "Export", false, true) {
-            self.error = Some(match controls::export_settings(&self.paths.home, &file) {
-                Ok(n) => format!("Exported {n} touch settings to {}.", file.display()),
-                Err(e) => e,
-            });
+            jni::save_document(
+                "horizon-settings.txt",
+                &controls::export_settings(&self.paths.home),
+            );
         }
         // Where a Minecraft folder can be copied to.
         let (row, i) = next(&mut y);

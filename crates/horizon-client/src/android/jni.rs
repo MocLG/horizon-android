@@ -63,6 +63,36 @@ extern "system" fn Java_com_lukagejak_horizon_HorizonActivity_nativeKey<'caller>
     }
 }
 
+/// Files the player picked to import (`open_documents`): name and text.
+static PICKED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+pub fn take_picked() -> Vec<(String, String)> {
+    std::mem::take(&mut *PICKED.lock().unwrap())
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_lukagejak_horizon_HorizonActivity_nativePicked<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    name: JString<'caller>,
+    text: JString<'caller>,
+) {
+    env.with_env(|env| -> Result<(), jni::errors::Error> {
+        let picked = (name.try_to_string(env)?, text.try_to_string(env)?);
+        PICKED.lock().unwrap().push(picked);
+        if let Some(proxy) = WAKE.lock().unwrap().as_ref() {
+            let _ = proxy.send_event(());
+        }
+        Ok(())
+    })
+    .resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+/// Asks the player where to save `text`, suggesting `name`.
+pub fn save_document(name: &str, text: &str) {
+    platform("save_document", &format!("{name}\n{text}"));
+}
+
 /// Whether the soft keyboard last showed or hid, until the game takes it.
 static KEYBOARD: Mutex<Option<bool>> = Mutex::new(None);
 
@@ -109,7 +139,10 @@ pub fn gyroscope(on: bool) {
 static ACTIVITY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub fn set_activity(app: &winit::platform::android::activity::AndroidApp) {
-    ACTIVITY.store(app.activity_as_ptr() as usize, std::sync::atomic::Ordering::Relaxed);
+    ACTIVITY.store(
+        app.activity_as_ptr() as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// Calls `HorizonActivity.platform(op, arg)`; `None` when it returned null or failed.
