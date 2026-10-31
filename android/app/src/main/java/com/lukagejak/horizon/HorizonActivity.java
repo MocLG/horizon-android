@@ -99,6 +99,7 @@ public class HorizonActivity extends NativeActivity {
     private FrameLayout secondRoot;
     private TextSink secondSink;
     private boolean secondKeyboardShown;
+    private volatile boolean secondScreenAvailable;
     private SecondDebugView secondDebug;
     private SecondInventoryView secondInventory;
     private TextView secondMapTab;
@@ -288,6 +289,7 @@ public class HorizonActivity extends NativeActivity {
                 presentation.setContentView(root);
                 presentation.show();
                 secondScreen = presentation;
+                secondScreenAvailable = true;
                 secondRoot = root;
                 secondSink = second;
                 secondDebug = debug;
@@ -312,6 +314,7 @@ public class HorizonActivity extends NativeActivity {
             secondScreen.dismiss();
             secondScreen = null;
         }
+        secondScreenAvailable = false;
         secondRoot = null;
         secondSink = null;
         secondKeyboardShown = false;
@@ -418,6 +421,8 @@ public class HorizonActivity extends NativeActivity {
             case "vibrate":
                 vibrate(Integer.parseInt(arg));
                 return null;
+            case "second_screen":
+                return secondScreenAvailable ? "1" : "0";
             case "second_debug":
                 runOnUiThread(() -> {
                     if (secondDebug != null) {

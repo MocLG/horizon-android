@@ -277,10 +277,13 @@ impl AndroidGame {
         if touch.gyroscope {
             jni::gyroscope(true);
         }
+        let second_screen = jni::platform("second_screen", "").is_some_and(|v| v == "1");
         OVERLAY.with(|o| {
+            let mut menu = Menu::new(ball);
+            menu.set_ball_visible(!second_screen);
             *o.borrow_mut() = Some(Overlay {
                 controls,
-                menu: Menu::new(ball),
+                menu,
                 editor: None,
                 settings: touch,
                 screen: ControlScreen {
