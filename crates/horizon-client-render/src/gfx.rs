@@ -573,8 +573,11 @@ pub struct Renderer {
     pub hud: HudRenderer,
     /// The atlas and glint views the HUD bind groups sample, kept so the
     /// bottom surface's HUD can bind them too.
+    #[cfg(target_os = "android")]
     hud_atlas_view: wgpu::TextureView,
+    #[cfg(target_os = "android")]
     hud_glint_view: wgpu::TextureView,
+    #[cfg(target_os = "android")]
     hud_glint_sampler: wgpu::Sampler,
     /// The bottom surface's own HUD geometry and uniform, kept apart from the
     /// main HUD's so two frames on this device cannot overwrite each other.
@@ -2684,8 +2687,11 @@ impl Renderer {
             pack_atlas: None,
             pack_terrain_flat: false,
             hud,
+            #[cfg(target_os = "android")]
             hud_atlas_view: atlas_view,
+            #[cfg(target_os = "android")]
             hud_glint_view: glint_view,
+            #[cfg(target_os = "android")]
             hud_glint_sampler: glint_sampler,
             bottom_hud: None,
             menu_blur: None,
