@@ -208,7 +208,9 @@ impl AndroidGame {
         let home = std::env::current_dir()?;
         let settings = Settings::load(&home.join("options.txt"));
         Behaviours::set_cache_dir(home.join(".horizon-cache"));
-        let enabled = flag(&home, "touchControls", true);
+        let second_screen = jni::platform("second_screen", "").is_some_and(|v| v == "1");
+        // The Thor's gamepad and bottom UI replace the on-screen buttons.
+        let enabled = !second_screen && flag(&home, "touchControls", true);
         let dp = jni::platform("density", "")
             .and_then(|d| d.parse().ok())
             .unwrap_or(2.0);
@@ -277,7 +279,6 @@ impl AndroidGame {
         if touch.gyroscope {
             jni::gyroscope(true);
         }
-        let second_screen = jni::platform("second_screen", "").is_some_and(|v| v == "1");
         OVERLAY.with(|o| {
             let mut menu = Menu::new(ball);
             menu.set_ball_visible(!second_screen);
