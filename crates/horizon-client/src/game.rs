@@ -1880,6 +1880,7 @@ struct Game<'a> {
     /// Shift the inventory panel right of the bottom screen's tabs.
     second_inventory_shift: f32,
     /// When a finger last controlled the bottom preview's head.
+    #[cfg(target_os = "android")]
     second_preview_touch_at: Option<Instant>,
     /// How much the bottom preview's head copies the camera: 0 follows the
     /// finger, 1 the camera, with a smooth hand-over between the two.
@@ -14218,6 +14219,7 @@ impl<'a> Game<'a> {
             debug_charts: Default::default(),
             second_inventory_preview: false,
             second_inventory_shift: 0.0,
+            #[cfg(target_os = "android")]
             second_preview_touch_at: None,
             second_preview_camera_blend: 1.0,
             show_hitboxes: false,
