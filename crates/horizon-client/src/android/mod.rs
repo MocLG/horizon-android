@@ -7,6 +7,7 @@ pub mod install;
 pub mod jni;
 mod launcher;
 mod logcat;
+pub mod second_screen;
 mod shell;
 mod ui;
 mod update;

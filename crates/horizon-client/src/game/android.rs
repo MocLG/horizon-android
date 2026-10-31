@@ -144,6 +144,10 @@ pub(crate) struct AndroidGame {
     dp: f32,
     dark: bool,
     was_in_game: bool,
+    /// The inventory the bottom screen opened, and the tab it last saw.
+    /// The bottom window while the main renderer owns it (Items tab).
+    second_window: Option<ndk::native_window::NativeWindow>,
+    second_rects_at: Option<Instant>,
 }
 
 /// The control layout the player picked (`controlLayout` in horizon.txt,
@@ -204,7 +208,9 @@ impl AndroidGame {
         let home = std::env::current_dir()?;
         let settings = Settings::load(&home.join("options.txt"));
         Behaviours::set_cache_dir(home.join(".horizon-cache"));
-        let enabled = flag(&home, "touchControls", true);
+        let second_screen = jni::platform("second_screen", "").is_some_and(|v| v == "1");
+        // The Thor's gamepad and bottom UI replace the on-screen buttons.
+        let enabled = !second_screen && flag(&home, "touchControls", true);
         let dp = jni::platform("density", "")
             .and_then(|d| d.parse().ok())
             .unwrap_or(2.0);
@@ -274,9 +280,11 @@ impl AndroidGame {
             jni::gyroscope(true);
         }
         OVERLAY.with(|o| {
+            let mut menu = Menu::new(ball);
+            menu.set_ball_visible(!second_screen);
             *o.borrow_mut() = Some(Overlay {
                 controls,
-                menu: Menu::new(ball),
+                menu,
                 editor: None,
                 settings: touch,
                 screen: ControlScreen {
@@ -307,6 +315,8 @@ impl AndroidGame {
             dp,
             dark,
             was_in_game: false,
+            second_window: None,
+            second_rects_at: None,
         })
     }
 
@@ -455,6 +465,12 @@ impl AndroidGame {
                     with_overlay(|o| o.controls.gamepad = true);
                 }
             }
+            WindowEvent::RedrawRequested => {
+                self.app.window_event(event_loop, id, event);
+                // After the main surface has been submitted, so the shared
+                // device never has two frames in flight writing the HUD.
+                self.second_screen_render();
+            }
             event => self.app.window_event(event_loop, id, event),
         }
     }
@@ -527,6 +543,78 @@ impl AndroidGame {
             && let Err(e) = game.pad_back()
         {
             log::warn!("Horizon: back: {e}");
+        }
+    }
+
+    /// The bottom screen's Items tab: open the player inventory on entering,
+    /// apply the taps it queued, and publish the snapshot it draws.
+    fn second_screen(&mut self) {
+        let tab = crate::android::second_screen::tab();
+        let App::Ready(game) = &mut self.app else {
+            return;
+        };
+        if tab == 2 {
+            if self.second_window.is_none()
+                && let Some(window) = crate::android::second_screen::take_handoff()
+            {
+                let ptr = window.ptr().as_ptr() as *mut core::ffi::c_void;
+                let width = window.width().max(1) as u32;
+                let height = window.height().max(1) as u32;
+                let attached = game
+                    .renderer
+                    .as_mut()
+                    .is_some_and(|renderer| renderer.attach_bottom(ptr, width, height));
+                if attached {
+                    self.second_rects_at = None;
+                    crate::android::jni::platform("second_inventory_overlay", "1");
+                }
+                self.second_window = Some(window);
+            }
+            for (slot, button) in crate::android::second_screen::take_inventory_clicks() {
+                game.android_inventory_click(slot, button);
+            }
+        } else {
+            if self.second_window.is_none()
+                && let Some(window) = crate::android::second_screen::take_handoff()
+            {
+                crate::android::second_screen::return_window(window);
+            }
+            if self.second_window.is_some() {
+                if let Some(renderer) = &mut game.renderer {
+                    renderer.detach_bottom();
+                }
+                if let Some(window) = self.second_window.take() {
+                    crate::android::jni::platform("second_inventory_overlay", "0");
+                    crate::android::second_screen::return_window(window);
+                }
+            }
+            // The bottom inventory's finger is gone with its tab: the next
+            // visit starts from the camera.
+            crate::android::second_screen::set_inventory_touching(false);
+            game.second_preview_touch_at = None;
+            game.second_preview_camera_blend = 1.0;
+        }
+    }
+
+    /// After the main frame: draw the real inventory HUD to the shared bottom
+    /// surface and refresh the touch rectangles.
+    fn second_screen_render(&mut self) {
+        if crate::android::second_screen::tab() != 2 || self.second_window.is_none() {
+            return;
+        }
+        let App::Ready(game) = &mut self.app else {
+            return;
+        };
+        let Some(rects) = game.android_render_bottom_inventory() else {
+            return;
+        };
+        let now = Instant::now();
+        if self
+            .second_rects_at
+            .is_none_or(|at| now.duration_since(at).as_millis() >= 1000)
+        {
+            self.second_rects_at = Some(now);
+            crate::android::jni::platform("second_inventory_rects", &rects);
         }
     }
 
@@ -606,6 +694,7 @@ impl AndroidGame {
                 self.ask_keyboard(want);
             }
         }
+        self.second_screen();
         self.app.about_to_wait(event_loop);
     }
 
@@ -1036,6 +1125,9 @@ impl AndroidGame {
         let slop = SLOP * self.dp;
         match finger.phase {
             TouchPhase::Started => {
+                // A touch after the player hid the keyboard means they want it
+                // back, even if the same field still has focus.
+                self.keyboard_dismissed = false;
                 let enabled = self.enabled;
                 let claim = with_overlay(|o| {
                     if !enabled {
@@ -1518,5 +1610,104 @@ mod tests {
             Some(MouseButton::Right)
         );
         assert_eq!(pad_button(96), Some(PadButton::South));
+    }
+}
+
+impl Game<'_> {
+    /// Build the real inventory HUD for the bottom surface and draw it there.
+    /// Returns the touch rectangles in bottom-surface pixels.
+    fn android_render_bottom_inventory(&mut self) -> Option<String> {
+        if self.player.is_none() || self.title.is_some() {
+            return None;
+        }
+        let size = self.renderer.as_ref()?.bottom_size()?;
+        let mut batch = HudBatch::new(size);
+        // The bottom panel is much larger than the top window: scale the real
+        // inventory up to fill the space right of the 160px tab column.
+        let scale = 6.0;
+        let tabs = 160.0;
+        batch.scale = scale;
+        batch.width = ((size[0] as f32 - tabs) / scale).ceil();
+        batch.height = (size[1] as f32 / scale).ceil();
+        self.second_inventory_preview = true;
+        self.second_inventory_shift = tabs / scale;
+        let touched = crate::android::second_screen::take_inventory_touch();
+        let touching = touched || crate::android::second_screen::inventory_touching();
+        let now = Instant::now();
+        if touching {
+            self.second_preview_touch_at = Some(now);
+        }
+        // Keep the finger's pose for a moment after it lifts, then ease the
+        // head back to the camera over the following seconds.
+        const HOLD: Duration = Duration::from_secs(2);
+        const RETURN: f32 = 1.5;
+        self.second_preview_camera_blend = match self.second_preview_touch_at {
+            None => 1.0,
+            Some(at) => {
+                let idle = now.saturating_duration_since(at);
+                if idle <= HOLD {
+                    0.0
+                } else {
+                    ((idle - HOLD).as_secs_f32() / RETURN).clamp(0.0, 1.0)
+                }
+            }
+        };
+        let saved = self.cursor;
+        let cursor = crate::android::second_screen::inventory_cursor();
+        self.cursor = cursor
+            .map(|(x, y)| (x / scale, y / scale))
+            .unwrap_or((batch.width / 2.0, batch.height / 2.0));
+        self.draw_inventory(&mut batch);
+        let rects = self.android_inventory_rects(&batch);
+        self.cursor = saved;
+        self.second_inventory_preview = false;
+        self.second_inventory_shift = 0.0;
+        let renderer = self.renderer.as_mut()?;
+        renderer.render_bottom_inventory(&batch);
+        Some(rects)
+    }
+
+    fn android_inventory_rects(&self, batch: &HudBatch) -> String {
+        use std::fmt::Write;
+        let (ox, oy) = self.inventory_origin(batch);
+        let scale = batch.scale;
+        let mut out = String::new();
+        for slot in self.slots() {
+            let (sx, sy) = self.slot_position(slot);
+            let x = (ox + sx) * scale;
+            let y = (oy + sy) * scale;
+            let w = 16.0 * scale;
+            let h = 16.0 * scale;
+            let _ = writeln!(out, "rect|{slot}|{x:.0}|{y:.0}|{w:.0}|{h:.0}");
+        }
+        out
+    }
+
+    /// A tap on a bottom-screen inventory slot. Use the same mouse-click path
+    /// the top inventory uses, which handles crafting results and special slots
+    /// that `menu_ops` alone does not.
+    fn android_inventory_click(&mut self, slot: usize, button: i32) {
+        if self.player.is_none() || self.title.is_some() {
+            return;
+        }
+        let Some(size) = self
+            .renderer
+            .as_ref()
+            .map(|r| [r.config.width, r.config.height])
+        else {
+            return;
+        };
+        let batch = HudBatch::new(size);
+        let (ox, oy) = self.inventory_origin(&batch);
+        let (sx, sy) = self.slot_position(slot);
+        let saved = self.cursor;
+        self.cursor = (ox + sx + 8.0, oy + sy + 8.0);
+        let before = self.carried.as_ref().map(|s| (s.item.to_string(), s.count));
+        self.click_inventory(button == 1);
+        let after = self.carried.as_ref().map(|s| (s.item.to_string(), s.count));
+        self.cursor = saved;
+        log::info!(
+            "Second inventory click slot={slot} button={button} carried {before:?} -> {after:?}"
+        );
     }
 }

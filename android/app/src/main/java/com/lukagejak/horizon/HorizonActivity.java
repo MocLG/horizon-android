@@ -2,24 +2,35 @@ package com.lukagejak.horizon;
 
 import android.app.ActivityManager;
 import android.app.NativeActivity;
+import android.app.Presentation;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.hardware.display.DisplayManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.text.InputType;
+import android.util.Log;
+import android.view.Display;
 import android.view.DisplayCutout;
+import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
@@ -27,6 +38,9 @@ import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 import android.window.OnBackInvokedDispatcher;
 
@@ -57,6 +71,21 @@ public class HorizonActivity extends NativeActivity {
     /** The phone turned by (x, y) radians since the last call: the gyroscope's look. */
     static native void nativeGyro(float x, float y);
 
+    /** The second screen's Surface, or null when it went away. */
+    static native void nativeSecondSurface(Surface surface);
+
+    /** The bottom panel's tab: 0 is the map, 1 the debug view, 2 the inventory. */
+    static native void nativeSecondTab(int tab);
+
+    /** A tap on a bottom-screen inventory slot. */
+    static native void nativeInventoryClick(int slot, int button);
+
+    /** Where the finger is on the bottom inventory, in surface pixels. */
+    static native void nativeInventoryCursor(float x, float y);
+
+    /** Whether a finger is down on the bottom inventory. */
+    static native void nativeInventoryTouch(boolean touching);
+
     private static final int SAVE_DOCUMENT = 1;
     private static final int OPEN_DOCUMENTS = 2;
 
@@ -65,6 +94,21 @@ public class HorizonActivity extends NativeActivity {
     private String toSave;
     private boolean keyboardShown;
     private SensorEventListener gyroscope;
+    /** The second screen (the AYN Thor's bottom panel), if it has one. */
+    private Presentation secondScreen;
+    private FrameLayout secondRoot;
+    private TextSink secondSink;
+    private boolean secondKeyboardShown;
+    private volatile boolean secondScreenAvailable;
+    private SecondDebugView secondDebug;
+    private SecondInventoryView secondInventory;
+    private TextView secondMapTab;
+    private TextView secondDebugTab;
+    private TextView secondItemsTab;
+    private TextView secondSplitButton;
+    private BottomKeyboardView secondKeyboard;
+    private LinearLayout secondTabs;
+    private int secondTab;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -79,7 +123,7 @@ public class HorizonActivity extends NativeActivity {
                 boolean shown = insets.isVisible(WindowInsets.Type.ime());
                 if (shown != keyboardShown) {
                     keyboardShown = shown;
-                    nativeKeyboard(shown);
+                    nativeKeyboard(shown || secondKeyboardShown);
                 }
                 return view.onApplyWindowInsets(insets);
             });
@@ -90,6 +134,18 @@ public class HorizonActivity extends NativeActivity {
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT, () -> nativeKey(3));
         }
         immersive();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        showSecondScreen();
+    }
+
+    @Override
+    protected void onPause() {
+        hideSecondScreen();
+        super.onPause();
     }
 
     @Override
@@ -123,6 +179,207 @@ public class HorizonActivity extends NativeActivity {
                             | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                             | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
         }
+    }
+
+    /**
+     * Shows the app's content on a second screen when the device has a
+     * presentation display (the AYN Thor's bottom panel), and hands its
+     * Surface to the native renderer.
+     */
+    private void showSecondScreen() {
+        if (secondScreen != null) {
+            return;
+        }
+        DisplayManager manager = getSystemService(DisplayManager.class);
+        if (manager == null) {
+            return;
+        }
+        int main = getWindowManager().getDefaultDisplay().getDisplayId();
+        for (Display display : manager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)) {
+            if (display.getDisplayId() == main) {
+                continue;
+            }
+            try {
+                Presentation presentation = new Presentation(this, display);
+                SurfaceView view = new SurfaceView(this);
+                view.getHolder().addCallback(new SurfaceHolder.Callback() {
+                    @Override
+                    public void surfaceCreated(SurfaceHolder holder) {
+                        Log.i("Horizon", "Second screen surface on display "
+                                + display.getDisplayId());
+                        nativeSecondSurface(holder.getSurface());
+                    }
+
+                    @Override
+                    public void surfaceChanged(SurfaceHolder holder, int format, int width,
+                            int height) {
+                    }
+
+                    @Override
+                    public void surfaceDestroyed(SurfaceHolder holder) {
+                        Log.i("Horizon", "Second screen surface destroyed");
+                        nativeSecondSurface(null);
+                    }
+                });
+                SecondDebugView debug = new SecondDebugView(this);
+                debug.setVisibility(View.GONE);
+                SecondInventoryView inventory = new SecondInventoryView(this);
+                inventory.setVisibility(View.GONE);
+                TextView mapTab = secondTabView("Map");
+                TextView debugTab = secondTabView("Debug");
+                TextView itemsTab = secondTabView("Items");
+                TextView splitButton = secondTabView("Drag");
+                splitButton.setTextSize(12);
+                TextSink second = new TextSink(this);
+                FrameLayout root = new FrameLayout(this);
+                root.addView(view, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                root.addView(second, new FrameLayout.LayoutParams(1, 1));
+                if (Build.VERSION.SDK_INT >= 30) {
+                    presentation.getWindow().getDecorView().setOnApplyWindowInsetsListener(
+                            (v, insets) -> {
+                                boolean shown = insets.isVisible(WindowInsets.Type.ime());
+                                if (shown != secondKeyboardShown) {
+                                    secondKeyboardShown = shown;
+                                    nativeKeyboard(shown || keyboardShown);
+                                }
+                                return v.onApplyWindowInsets(insets);
+                            });
+                }
+                root.addView(debug, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                root.addView(inventory, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                LinearLayout tabs = new LinearLayout(this);
+                tabs.setOrientation(LinearLayout.VERTICAL);
+                LinearLayout.LayoutParams mapTabAt =
+                        new LinearLayout.LayoutParams(dp(60), dp(56));
+                LinearLayout.LayoutParams debugTabAt =
+                        new LinearLayout.LayoutParams(dp(60), dp(56));
+                debugTabAt.topMargin = dp(8);
+                LinearLayout.LayoutParams itemsTabAt =
+                        new LinearLayout.LayoutParams(dp(60), dp(56));
+                itemsTabAt.topMargin = dp(8);
+                LinearLayout.LayoutParams splitAt =
+                        new LinearLayout.LayoutParams(dp(60), dp(44));
+                splitAt.topMargin = dp(8);
+                tabs.addView(mapTab, mapTabAt);
+                tabs.addView(debugTab, debugTabAt);
+                tabs.addView(itemsTab, itemsTabAt);
+                tabs.addView(splitButton, splitAt);
+                FrameLayout.LayoutParams tabsAt = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.LEFT | Gravity.CENTER_VERTICAL);
+                tabsAt.leftMargin = dp(8);
+                root.addView(tabs, tabsAt);
+                mapTab.setOnClickListener(v -> selectSecondTab(0));
+                debugTab.setOnClickListener(v -> selectSecondTab(1));
+                itemsTab.setOnClickListener(v -> selectSecondTab(2));
+                splitButton.setOnClickListener(v -> {
+                    boolean split = inventory.toggleSplit();
+                    splitButton.setText(split ? "Split" : "Drag");
+                    splitButton.setBackground(tabBackground(split));
+                });
+                BottomKeyboardView keyboard =
+                        new BottomKeyboardView(this, this::hideBottomKeyboard);
+                FrameLayout.LayoutParams keyboardAt = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(310), Gravity.BOTTOM);
+                root.addView(keyboard, keyboardAt);
+
+                presentation.setContentView(root);
+                presentation.show();
+                secondScreen = presentation;
+                secondScreenAvailable = true;
+                secondRoot = root;
+                secondSink = second;
+                secondDebug = debug;
+                secondInventory = inventory;
+                secondMapTab = mapTab;
+                secondDebugTab = debugTab;
+                secondItemsTab = itemsTab;
+                secondSplitButton = splitButton;
+                secondKeyboard = keyboard;
+                secondTabs = tabs;
+                selectSecondTab(0);
+                Log.i("Horizon", "Second screen shown on display " + display.getDisplayId());
+                return;
+            } catch (RuntimeException e) {
+                Log.w("Horizon", "Second screen unavailable: " + e);
+            }
+        }
+    }
+
+    private void hideSecondScreen() {
+        if (secondScreen != null) {
+            secondScreen.dismiss();
+            secondScreen = null;
+        }
+        secondScreenAvailable = false;
+        secondRoot = null;
+        secondSink = null;
+        secondKeyboardShown = false;
+        secondDebug = null;
+        secondInventory = null;
+        secondMapTab = null;
+        secondDebugTab = null;
+        secondItemsTab = null;
+        secondSplitButton = null;
+        secondKeyboard = null;
+        secondTabs = null;
+        nativeSecondSurface(null);
+    }
+
+    private void selectSecondTab(int tab) {
+        secondTab = tab;
+        if (tab != 2) {
+            nativeInventoryTouch(false);
+        }
+        if (secondDebug != null) {
+            secondDebug.setVisibility(tab == 1 ? View.VISIBLE : View.GONE);
+        }
+        if (secondInventory != null) {
+            secondInventory.setVisibility(tab == 2 ? View.VISIBLE : View.GONE);
+        }
+        if (secondMapTab != null) {
+            secondMapTab.setBackground(tabBackground(tab == 0));
+        }
+        if (secondDebugTab != null) {
+            secondDebugTab.setBackground(tabBackground(tab == 1));
+        }
+        if (secondItemsTab != null) {
+            secondItemsTab.setBackground(tabBackground(tab == 2));
+        }
+        if (secondSplitButton != null) {
+            secondSplitButton.setVisibility(tab == 2 ? View.VISIBLE : View.INVISIBLE);
+        }
+        nativeSecondTab(tab);
+        Log.i("Horizon", "Second screen tab " + tab);
+    }
+
+    private TextView secondTabView(String label) {
+        TextView view = new TextView(this);
+        view.setText(label);
+        view.setTextSize(14);
+        view.setTextColor(0xFFF2F2F6);
+        view.setGravity(Gravity.CENTER);
+        view.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        view.setBackground(tabBackground(false));
+        view.setClickable(true);
+        view.setFocusable(true);
+        return view;
+    }
+
+    private GradientDrawable tabBackground(boolean selected) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setShape(GradientDrawable.RECTANGLE);
+        drawable.setCornerRadius(dp(12));
+        drawable.setColor(selected ? 0xFF7A6CD6 : 0xFF1C1C22);
+        drawable.setStroke(dp(1), selected ? 0xFF9C90EA : 0xFF34343E);
+        return drawable;
+    }
+
+    private int dp(float value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
     /**
@@ -163,6 +420,36 @@ public class HorizonActivity extends NativeActivity {
                 return null;
             case "vibrate":
                 vibrate(Integer.parseInt(arg));
+                return null;
+            case "second_screen":
+                return secondScreenAvailable ? "1" : "0";
+            case "second_debug":
+                runOnUiThread(() -> {
+                    if (secondDebug != null) {
+                        secondDebug.setStats(arg);
+                    }
+                });
+                return null;
+            case "second_inventory":
+                runOnUiThread(() -> {
+                    if (secondInventory != null) {
+                        secondInventory.setData(arg);
+                    }
+                });
+                return null;
+            case "second_inventory_overlay":
+                runOnUiThread(() -> {
+                    if (secondInventory != null) {
+                        secondInventory.setOverlay(arg.equals("1"));
+                    }
+                });
+                return null;
+            case "second_inventory_rects":
+                runOnUiThread(() -> {
+                    if (secondInventory != null) {
+                        secondInventory.setRects(arg);
+                    }
+                });
                 return null;
             case "native_lib_dir":
                 return getApplicationInfo().nativeLibraryDir;
@@ -372,34 +659,85 @@ public class HorizonActivity extends NativeActivity {
     }
 
     private void keyboard(boolean show) {
-        InputMethodManager manager = getSystemService(InputMethodManager.class);
-        if (manager == null) {
+        boolean second = secondScreen != null && secondSink != null;
+        if (second && secondKeyboard != null) {
+            // Android's IME only follows the top-focused display, so the
+            // bottom keyboard is drawn here instead of moving the system one.
+            if (show) {
+                InputMethodManager main = getSystemService(InputMethodManager.class);
+                sink.setFocusable(false);
+                sink.setFocusableInTouchMode(false);
+                sink.clearFocus();
+                secondSink.clearFocus();
+                if (main != null) {
+                    hideIme(main, getWindow(), sink);
+                }
+                secondKeyboard.setVisibility(View.VISIBLE);
+                if (secondTabs != null) {
+                    secondTabs.setVisibility(View.GONE);
+                }
+            } else {
+                secondKeyboard.setVisibility(View.GONE);
+                if (secondTabs != null) {
+                    secondTabs.setVisibility(View.VISIBLE);
+                }
+            }
             return;
         }
+        InputMethodManager manager = getSystemService(InputMethodManager.class);
+        Window window = getWindow();
+        sink.setFocusable(show);
+        sink.setFocusableInTouchMode(show);
         if (show) {
-            sink.setFocusableInTouchMode(true);
+            if (manager == null) {
+                return;
+            }
             sink.requestFocus();
             manager.restartInput(sink);
-            // showSoftInput is ignored until the view has taken focus.
             sink.post(() -> {
+                sink.requestFocus();
                 if (Build.VERSION.SDK_INT >= 30) {
-                    WindowInsetsController controller = getWindow().getInsetsController();
+                    WindowInsetsController controller = window.getInsetsController();
                     if (controller != null) {
                         controller.show(WindowInsets.Type.ime());
                     }
                 }
                 manager.showSoftInput(sink, 0);
             });
-        } else {
-            if (Build.VERSION.SDK_INT >= 30) {
-                WindowInsetsController controller = getWindow().getInsetsController();
-                if (controller != null) {
-                    controller.hide(WindowInsets.Type.ime());
-                }
-            }
-            manager.hideSoftInputFromWindow(sink.getWindowToken(), 0);
+        } else if (manager != null) {
+            hideIme(manager, window, sink);
             sink.clearFocus();
         }
+    }
+
+    private void hideBottomKeyboard() {
+        if (secondKeyboard != null) {
+            secondKeyboard.setVisibility(View.GONE);
+        }
+        if (secondTabs != null) {
+            secondTabs.setVisibility(View.VISIBLE);
+        }
+        nativeKeyboard(false);
+        // A change just after the game asked for the keyboard is ignored as a
+        // stale echo; send it again once that window has passed, unless the
+        // player has already reopened it.
+        if (secondKeyboard != null) {
+            secondKeyboard.postDelayed(() -> {
+                if (secondKeyboard != null && secondKeyboard.getVisibility() != View.VISIBLE) {
+                    nativeKeyboard(false);
+                }
+            }, 700);
+        }
+    }
+
+    private static void hideIme(InputMethodManager manager, Window window, View target) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.ime());
+            }
+        }
+        manager.hideSoftInputFromWindow(target.getWindowToken(), 0);
     }
 
     /**
@@ -410,7 +748,10 @@ public class HorizonActivity extends NativeActivity {
     static final class TextSink extends View {
         TextSink(Context context) {
             super(context);
-            setFocusable(true);
+            // Only `keyboard(true)` makes a sink focusable, so it cannot
+            // steal focus (and pop the IME) when the app starts.
+            setFocusable(false);
+            setFocusableInTouchMode(false);
         }
 
         @Override

@@ -758,6 +758,13 @@ impl HudBatch {
         runs
     }
     /// `AbstractContainerScreen.init`: center in integer GUI coordinates.
+    /// Move every vertex added so far by `dx`/`dy` GUI pixels.
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        for v in &mut self.vertices {
+            v.pos[0] += dx;
+            v.pos[1] += dy;
+        }
+    }
     pub fn centered_origin(&self, width: f32, height: f32) -> (f32, f32) {
         (
             ((self.width - width) / 2.0).trunc(),

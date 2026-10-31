@@ -42,6 +42,9 @@ pub enum Choice {
 pub struct Menu {
     /// The ball's centre as a share of the screen.
     pub ball: (f32, f32),
+    /// Whether the floating menu ball is shown. Devices with a second screen
+    /// reach the game's menus through the gamepad and bottom UI instead.
+    pub show_ball: bool,
     pub open: bool,
     hits: Hits<Choice>,
     /// A finger on the ball: where it landed, and whether it dragged.
@@ -53,10 +56,19 @@ impl Menu {
     pub fn new(ball: (f32, f32)) -> Self {
         Self {
             ball,
+            show_ball: true,
             open: false,
             hits: Hits::new(),
             on_ball: None,
             pending: None,
+        }
+    }
+
+    pub fn set_ball_visible(&mut self, visible: bool) {
+        self.show_ball = visible;
+        if !visible {
+            self.open = false;
+            self.hits.clear();
         }
     }
 
@@ -70,6 +82,9 @@ impl Menu {
 
     /// Whether the menu takes a finger landing at `at`.
     pub fn down(&mut self, finger: u64, at: (f32, f32), screen: Screen) -> bool {
+        if !self.show_ball {
+            return false;
+        }
         let (x, y, r) = self.ball_disc(screen);
         if (at.0 - x).hypot(at.1 - y) <= r * 1.3 {
             self.on_ball = Some((finger, at, false));
@@ -127,6 +142,11 @@ impl Menu {
         screen: Screen,
         settings: Settings,
     ) {
+        if !self.show_ball {
+            self.hits.clear();
+            self.open = false;
+            return;
+        }
         let mut ui = Ui::new(atlas, batch, (0.0, 0.0));
         self.hits.clear();
         let d = screen.density;

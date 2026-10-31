@@ -236,7 +236,7 @@ fn auto_size_keeps_the_default_and_shrinks_a_crowded_layout() {
     }];
     let mut crowded = Controls::new(layout);
     let fit = crowded.fitting_size(SCREEN);
-    assert!(fit < 1.0 && fit >= 0.5, "{fit}");
+    assert!((0.5..1.0).contains(&fit), "{fit}");
 }
 
 #[test]

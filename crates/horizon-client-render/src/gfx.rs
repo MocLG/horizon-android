@@ -349,11 +349,23 @@ struct BorderUniform {
     color: [f32; 4],
     offset: [f32; 4],
 }
+/// A second bottom surface, sharing this renderer's instance, adapter, device
+/// and HUD pipelines. The window handle it was created from must outlive it
+/// (the caller owns that lifetime).
+#[allow(dead_code)]
+pub struct Bottom {
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    depth: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+}
 pub struct Renderer {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     /// The window's swapchain; `None` when rendering offscreen (`--offscreen`).
     surface: Option<wgpu::Surface<'static>>,
+    /// The shared-main-device second screen, when attached.
+    bottom: Option<Bottom>,
     /// The surface `release_surface` set aside for the renderer that replaces
     /// this one on the same device: reused, not created again, as a new
     /// surface for the window can come back lost (Wayland on Mesa).
@@ -559,6 +571,17 @@ pub struct Renderer {
     /// The pack's terrain program reads flat draws' vertices (`pack_terrain_inputs`).
     pack_terrain_flat: bool,
     pub hud: HudRenderer,
+    /// The atlas and glint views the HUD bind groups sample, kept so the
+    /// bottom surface's HUD can bind them too.
+    #[cfg(target_os = "android")]
+    hud_atlas_view: wgpu::TextureView,
+    #[cfg(target_os = "android")]
+    hud_glint_view: wgpu::TextureView,
+    #[cfg(target_os = "android")]
+    hud_glint_sampler: wgpu::Sampler,
+    /// The bottom surface's own HUD geometry and uniform, kept apart from the
+    /// main HUD's so two frames on this device cannot overwrite each other.
+    bottom_hud: Option<HudRenderer>,
     /// Vanilla's menu background blur, made on first use.
     menu_blur: Option<crate::menu_blur::MenuBlur>,
     pub info: wgpu::AdapterInfo,
@@ -790,7 +813,11 @@ fn backend_order(api: GraphicsApi, os: &str, wgpu_backend: bool) -> Vec<wgpu::Ba
         return vec![Backends::default()];
     }
     let windows = os == "windows";
+    let android = os == "android";
     match api {
+        // Adreno's Vulkan driver fails to link a pipeline Horizon uses; the
+        // GLES driver compiles the same shaders.
+        GraphicsApi::Auto if android => vec![Backends::GL],
         GraphicsApi::Auto if windows => vec![Backends::VULKAN, Backends::DX12, Backends::GL],
         GraphicsApi::Auto => vec![Backends::VULKAN, Backends::GL],
         GraphicsApi::Dx12 if windows => vec![Backends::DX12],
@@ -2522,6 +2549,7 @@ impl Renderer {
             instance,
             adapter,
             surface,
+            bottom: None,
             spare_surface: std::sync::Mutex::new(None),
             offscreen,
             in_flight: std::collections::VecDeque::new(),
@@ -2659,6 +2687,13 @@ impl Renderer {
             pack_atlas: None,
             pack_terrain_flat: false,
             hud,
+            #[cfg(target_os = "android")]
+            hud_atlas_view: atlas_view,
+            #[cfg(target_os = "android")]
+            hud_glint_view: glint_view,
+            #[cfg(target_os = "android")]
+            hud_glint_sampler: glint_sampler,
+            bottom_hud: None,
             menu_blur: None,
             info,
             suspended: size.width == 0 || size.height == 0,
@@ -2753,6 +2788,190 @@ impl Renderer {
         );
         self.surface = Some(surface);
         Ok(())
+    }
+    /// Attach a second bottom surface on this renderer's own instance, adapter
+    /// and device. The main HUD pipelines target the main surface format, so a
+    /// bottom surface that cannot use that same format is rejected.
+    ///
+    /// `window` is an `ANativeWindow *`. The caller owns its lifetime: it must
+    /// stay valid until after `detach_bottom` (or this renderer is dropped).
+    #[cfg(target_os = "android")]
+    #[allow(unsafe_code)]
+    pub fn attach_bottom(
+        &mut self,
+        window: *mut core::ffi::c_void,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        use wgpu::rwh::{
+            AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle,
+        };
+        if width == 0 || height == 0 {
+            log::warn!("Horizon bottom surface: zero size {width}x{height}");
+            return false;
+        }
+        let Some(native) = std::ptr::NonNull::new(window) else {
+            log::warn!("Horizon bottom surface: null ANativeWindow");
+            return false;
+        };
+        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_window_handle: RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(native)),
+            raw_display_handle: Some(RawDisplayHandle::Android(AndroidDisplayHandle::new())),
+        };
+        let surface = match unsafe { self.instance.create_surface_unsafe(target) } {
+            Ok(surface) => surface,
+            Err(e) => {
+                log::warn!("Horizon bottom surface: create_surface failed: {e}");
+                return false;
+            }
+        };
+        let caps = surface.get_capabilities(&self.adapter);
+        if !caps.formats.contains(&self.config.format) {
+            log::warn!(
+                "Horizon bottom surface: main format {:?} unsupported (has {:?})",
+                self.config.format,
+                caps.formats,
+            );
+            return false;
+        }
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: self.config.format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            color_space: Default::default(),
+        };
+        surface.configure(&self.device, &config);
+        // The main depth (`Self::depth`) is `Depth32Float`; match it.
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Horizon bottom depth"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&Default::default());
+        if self.bottom_hud.is_none() {
+            match HudRenderer::new(
+                &self.device,
+                self.config.format.remove_srgb_suffix(),
+                &self.hud_atlas_view,
+                &self.hud_glint_view,
+                &self.hud_glint_sampler,
+            ) {
+                Ok(mut hud) => {
+                    hud.atlas_texture = self.hud.atlas_texture.clone();
+                    self.bottom_hud = Some(hud);
+                }
+                Err(e) => {
+                    log::warn!("Horizon bottom surface: HUD: {e}");
+                    return false;
+                }
+            }
+        }
+        self.bottom = Some(Bottom {
+            surface,
+            config,
+            depth,
+            depth_view,
+        });
+        true
+    }
+    /// Drop the bottom surface, if any.
+    pub fn detach_bottom(&mut self) {
+        self.bottom = None;
+    }
+    /// The attached bottom surface's size, if any.
+    pub fn bottom_size(&self) -> Option<[u32; 2]> {
+        self.bottom
+            .as_ref()
+            .map(|bottom| [bottom.config.width, bottom.config.height])
+    }
+    /// Render an inventory HUD batch to the bottom surface, sharing the main
+    /// renderer's device, queue, uploads and HUD pipelines. Call this after the
+    /// main frame has been submitted (the HUD vertex buffer is overwritten).
+    pub fn render_bottom_inventory(&mut self, batch: &HudBatch) -> bool {
+        let Some(bottom) = self.bottom.take() else {
+            return false;
+        };
+        let frame = match bottom.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.bottom = Some(bottom);
+                return false;
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                bottom.surface.configure(&self.device, &bottom.config);
+                self.bottom = Some(bottom);
+                return false;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                self.bottom = Some(bottom);
+                return false;
+            }
+        };
+        let view = frame.texture.create_view(&Default::default());
+        let size = [bottom.config.width, bottom.config.height];
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Horizon bottom frame"),
+            });
+        {
+            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Horizon bottom clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.03,
+                            g: 0.03,
+                            b: 0.05,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &bottom.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        let Some(hud) = self.bottom_hud.as_mut() else {
+            log::warn!("Horizon bottom surface: no HUD renderer");
+            self.bottom = Some(bottom);
+            return false;
+        };
+        hud.prepare(&self.device, &mut self.uploads, &mut encoder, batch, size);
+        hud.draw(&mut encoder, &view, &bottom.depth_view, batch, size);
+        self.uploads.finish(&encoder);
+        let commands = encoder.finish();
+        self.queue.submit([commands]);
+        self.queue.present(frame);
+        self.bottom = Some(bottom);
+        true
     }
     /// The world's depth, which occlusion culling's test may read.
     fn depth(

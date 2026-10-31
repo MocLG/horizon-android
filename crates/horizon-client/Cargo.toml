@@ -87,6 +87,9 @@ winit = { version = "0.30.13", features = ["android-native-activity"] }
 # android-activity carries, so its `JavaVM` needs no conversion.
 jni = "0.22.4"
 ndk-context = "0.1.1"
+# The second screen: the Presentation's Surface as an ANativeWindow for its own wgpu surface.
+ndk = { version = "0.9", features = ["nativewindow"] }
+ndk-sys = "0.6"
 libc = "0.2"
 # The launcher's own code for accounts and Mojang's files (launcher/src), which the
 # Android app shares, and the preparation it runs on the phone.

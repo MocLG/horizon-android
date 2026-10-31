@@ -24,11 +24,57 @@ pub(super) struct ExtrasState {
     minimap: Minimap,
     /// The dimension the minimap's tiles belong to.
     minimap_dim: Option<Dim>,
+    /// The bottom panel's own minimap, independent of a mod's HUD one (Android).
+    #[cfg(target_os = "android")]
+    second_minimap: Minimap,
+    #[cfg(target_os = "android")]
+    second_minimap_dim: Option<Dim>,
+    /// The last frame times, for the second screen's debug chart.
+    #[cfg(target_os = "android")]
+    second_frames: std::collections::VecDeque<f32>,
+    #[cfg(target_os = "android")]
+    second_debug_at: Option<std::time::Instant>,
+    #[cfg(target_os = "android")]
+    second_cpu: Option<(std::time::Instant, u64)>,
     /// Auto-reconnect's attempts at the current server.
     reconnect: Tracker,
 }
 /// CPU time the minimap's tiles may take per frame.
 const MINIMAP_BUDGET: Duration = Duration::from_micros(300);
+/// The bottom panel's map covers the same area as the HUD one, with one
+/// texel per block instead of the HUD's two blocks per texel.
+#[cfg(target_os = "android")]
+const SECOND_MINIMAP_SIDE: usize = 256;
+
+/// The process's resident set size in MiB, for the debug screen.
+#[cfg(target_os = "android")]
+fn process_cpu_jiffies() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let end = stat.rfind(')')?;
+    let mut fields = stat[end + 1..].split_whitespace();
+    let utime: u64 = fields.nth(11)?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    Some(utime + stime)
+}
+
+#[cfg(target_os = "android")]
+fn gpu_percent() -> Option<u32> {
+    let text = std::fs::read_to_string("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage").ok()?;
+    text.split_whitespace()
+        .next()?
+        .trim_end_matches('%')
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "android")]
+fn resident_mb() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|pages| pages * 4096 / (1024 * 1024))
+        .unwrap_or(0)
+}
 
 impl Game<'_> {
     fn extras_now(&self) -> f64 {
@@ -58,9 +104,21 @@ impl Game<'_> {
             self.extras.mouse = [false; 2];
         }
         self.update_minimap();
+        #[cfg(target_os = "android")]
+        self.update_second_screen_minimap();
         // For mods (`render.frame-stats`, `native_frame_rate`).
         let now = self.extras_now();
         self.extras.fps.record(now, elapsed.as_secs_f32() * 1000.0);
+        #[cfg(target_os = "android")]
+        {
+            self.extras
+                .second_frames
+                .push_back(elapsed.as_secs_f32() * 1000.0);
+            while self.extras.second_frames.len() > 120 {
+                self.extras.second_frames.pop_front();
+            }
+            self.update_second_screen_debug();
+        }
         self.native_frame(elapsed);
     }
     /// The frame counter for mods: fps, min, 1% low.
@@ -124,6 +182,16 @@ impl Game<'_> {
         }
         Ok(())
     }
+    /// The map is a top-down satellite view, not the level the player is on.
+    /// The Nether keeps the floor below the head because its roof is bedrock.
+    fn minimap_layer(&self, head: i32) -> Layer {
+        if self.dim == Dim::Nether {
+            Layer::Below(head)
+        } else {
+            Layer::Surface
+        }
+    }
+
     /// The minimap a mod shows (`render.set-minimap`): its corner, its side
     /// in GUI pixels and its view of the player.
     fn minimap_shown(&self) -> Option<(Corner, f32, View)> {
@@ -157,6 +225,136 @@ impl Game<'_> {
             round: m.round,
         })
     }
+    /// Publishes the debug screen's numbers for the second screen's Debug tab.
+    #[cfg(target_os = "android")]
+    fn update_second_screen_debug(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(at) = self.extras.second_debug_at
+            && now.duration_since(at).as_millis() < 200
+        {
+            return;
+        }
+        self.extras.second_debug_at = Some(now);
+        let jiffies = process_cpu_jiffies();
+        let cpu = match (self.extras.second_cpu, jiffies) {
+            (Some((at, before)), Some(after)) => {
+                let seconds = now.duration_since(at).as_secs_f64().max(0.001);
+                Some(after.saturating_sub(before) as f64 / (100.0 * seconds) * 100.0)
+            }
+            _ => None,
+        };
+        self.extras.second_cpu = jiffies.map(|jiffies| (now, jiffies));
+        let gpu = gpu_percent();
+        let stages = self.streaming.stages();
+        let stage = |name: &str| {
+            stages
+                .iter()
+                .find(|(stage, _)| *stage == name)
+                .map_or(0, |(_, count)| *count)
+        };
+        let generating = stage("generating");
+        let queued = stage("queued");
+        let (fps, min, low) = self.frame_reading();
+        let frame = self.extras.second_frames.back().copied().unwrap_or(0.0);
+        let mut text = String::new();
+        use std::fmt::Write;
+        let _ = writeln!(text, "fps={fps}");
+        let _ = writeln!(text, "min={min}");
+        let _ = writeln!(text, "low={low}");
+        let _ = writeln!(text, "frame={frame:.2}");
+        if let Some(p) = self.player.as_ref() {
+            let x = p.position.x;
+            let y = p.position.y;
+            let z = p.position.z;
+            let _ = writeln!(text, "x={x:.1}");
+            let _ = writeln!(text, "y={y:.1}");
+            let _ = writeln!(text, "z={z:.1}");
+            let bx = x.floor() as i32;
+            let bz = z.floor() as i32;
+            let _ = writeln!(text, "cx={}", bx >> 4);
+            let _ = writeln!(text, "cz={}", bz >> 4);
+        }
+        let _ = writeln!(text, "dim={}", self.dim.id());
+        let day = self.world.day_time;
+        let _ = writeln!(text, "day={}", day.div_euclid(24000));
+        let _ = writeln!(text, "time={}", day.rem_euclid(24000));
+        let _ = writeln!(text, "chunks={}", self.world.chunks.len());
+        let _ = writeln!(text, "render={}", self.settings.render_distance);
+        let _ = writeln!(text, "generating={generating}");
+        let _ = writeln!(text, "queued={queued}");
+        let _ = writeln!(
+            text,
+            "cpu={}",
+            cpu.map_or_else(|| "-".to_owned(), |v| format!("{v:.0}"))
+        );
+        let _ = writeln!(
+            text,
+            "gpu={}",
+            gpu.map_or_else(|| "-".to_owned(), |v| v.to_string())
+        );
+        let _ = writeln!(text, "mem={}", resident_mb());
+        let frames = self
+            .extras
+            .second_frames
+            .iter()
+            .map(|ms| format!("{ms:.1}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(text, "frames={frames}");
+        crate::android::second_screen::publish_debug(text);
+    }
+
+    /// The bottom panel's minimap (Android), independent of the mods' HUD one:
+    /// north-up, centred on the player, published to the second screen.
+    #[cfg(target_os = "android")]
+    fn update_second_screen_minimap(&mut self) {
+        let Some(p) = self.player.as_ref() else {
+            return;
+        };
+        // The GPS marker points the way the player looks, on a north-up map.
+        let look = super::view_vector(self.yaw, 0.0);
+        crate::android::second_screen::publish_player(look[0] as f32, look[2] as f32);
+        if self.extras.second_minimap.side() != SECOND_MINIMAP_SIDE {
+            self.extras.second_minimap = Minimap::with_side(SECOND_MINIMAP_SIDE);
+            self.extras.second_minimap_dim = None;
+        }
+        if self.extras.second_minimap_dim != Some(self.dim) {
+            self.extras.second_minimap.clear();
+            self.extras.second_minimap_dim = Some(self.dim);
+        }
+        let view = View {
+            x: p.position.x,
+            z: p.position.z,
+            yaw: self.yaw,
+            rotate: false,
+            blocks_per_pixel: 1.0,
+            round: false,
+        };
+        let head = (p.position.y + f64::from(p.dimensions.eye_height)).floor() as i32;
+        let (bx, bz) = (view.x.floor() as i32, view.z.floor() as i32);
+        let layer = self.minimap_layer(head);
+        let reach = self.extras.second_minimap.side() as f32 / 2.0
+            * view.blocks_per_pixel
+            * std::f32::consts::SQRT_2;
+        let radius = ((reach / 16.0).ceil() as i32 + 1).min(self.settings.render_distance.max(2));
+        self.extras.second_minimap.update(
+            &self.world,
+            self.res.facts(),
+            (bx >> 4, bz >> 4),
+            radius,
+            layer,
+            MINIMAP_BUDGET,
+        );
+        if self.extras.second_minimap.compose(view) {
+            let side = self.extras.second_minimap.side() as u32;
+            crate::android::second_screen::publish_map(
+                side,
+                side,
+                &self.extras.second_minimap.image,
+            );
+        }
+    }
+
     /// Refresh the minimap's tiles within the frame budget, recompose its
     /// image when the view or a tile changed, and queue the upload.
     fn update_minimap(&mut self) {
@@ -176,13 +374,7 @@ impl Game<'_> {
         };
         let head = (p.position.y + f64::from(p.dimensions.eye_height)).floor() as i32;
         let (bx, bz) = (view.x.floor() as i32, view.z.floor() as i32);
-        // Underground, under a roof or in the Nether: the floor around the player.
-        let covered = self.world.light(bx, head, bz) >> 4 == 0;
-        let layer = if self.dim == Dim::Nether || covered {
-            Layer::Below(head)
-        } else {
-            Layer::Surface
-        };
+        let layer = self.minimap_layer(head);
         // The chunks the image can reach (its corners when it turns).
         let reach = minimap::SIZE as f32 / 2.0 * view.blocks_per_pixel * std::f32::consts::SQRT_2;
         let radius = ((reach / 16.0).ceil() as i32 + 1).min(self.settings.render_distance.max(2));

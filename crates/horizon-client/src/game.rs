@@ -1875,6 +1875,16 @@ struct Game<'a> {
     debug_keys: horizon_client::debug_keys::DebugKeys,
     /// The F3 overlay's charts (F3+2, F3+3).
     debug_charts: horizon_client::debug_chart::DebugCharts,
+    /// Draw the survival inventory's player preview in the bottom batch too.
+    second_inventory_preview: bool,
+    /// Shift the inventory panel right of the bottom screen's tabs.
+    second_inventory_shift: f32,
+    /// When a finger last controlled the bottom preview's head.
+    #[cfg(target_os = "android")]
+    second_preview_touch_at: Option<Instant>,
+    /// How much the bottom preview's head copies the camera: 0 follows the
+    /// finger, 1 the camera, with a smooth hand-over between the two.
+    second_preview_camera_blend: f32,
     show_hitboxes: bool,
     show_chunk_borders: bool,
     /// PauseScreen.showPauseMenu (false after F3+Escape).
@@ -6375,7 +6385,10 @@ impl Game<'_> {
             return Self::creative_origin(batch);
         }
         let (x, y) = batch.centered_origin(176.0, self.screen_height());
-        (x + self.recipe_book_shift(batch.width), y)
+        (
+            x + self.recipe_book_shift(batch.width) + self.second_inventory_shift,
+            y,
+        )
     }
     /// Slot ids: 0..36 player inventory, 100..109 crafting grid, 200 result.
     fn container_kind(&self) -> Option<&BlockEntity> {
@@ -6583,14 +6596,16 @@ impl Game<'_> {
         let (ox, oy) = self.inventory_origin(batch);
         {
             let atlas = &self.gui.atlas;
-            batch.fill(
-                atlas,
-                0.0,
-                0.0,
-                batch.width,
-                batch.height,
-                rgba(16, 16, 16, 160),
-            );
+            if !self.second_inventory_preview {
+                batch.fill(
+                    atlas,
+                    0.0,
+                    0.0,
+                    batch.width,
+                    batch.height,
+                    rgba(16, 16, 16, 160),
+                );
+            }
             let part = |batch: &mut HudBatch,
                         name: &str,
                         sx: f32,
@@ -14202,6 +14217,11 @@ impl<'a> Game<'a> {
             friends: None,
             debug_keys: Default::default(),
             debug_charts: Default::default(),
+            second_inventory_preview: false,
+            second_inventory_shift: 0.0,
+            #[cfg(target_os = "android")]
+            second_preview_touch_at: None,
+            second_preview_camera_blend: 1.0,
             show_hitboxes: false,
             show_chunk_borders: false,
             pause_menu: true,
