@@ -255,21 +255,45 @@ fn brightness(color: u8, height: i16, north: Option<i16>, depth: u8, parity: i32
 const UNKNOWN: [u8; 4] = [20, 20, 20, 200];
 const BORDER: [u8; 4] = [10, 10, 10, 230];
 
-#[derive(Default)]
 pub struct Minimap {
     tiles: FxHashMap<(i32, i32), Tile>,
     palette: Option<Palette>,
     composed: Option<View>,
     /// Tiles changed since the image was composed.
     changed: bool,
-    /// The composed image, `SIZE` x `SIZE` RGBA.
+    /// The image's side in texels.
+    side: usize,
+    /// The composed image, `side` x `side` RGBA.
     pub image: Vec<u8>,
 }
+impl Default for Minimap {
+    fn default() -> Self {
+        Self::with_side(SIZE)
+    }
+}
 impl Minimap {
+    /// A map whose image is `side` x `side` texels. The HUD minimap uses
+    /// [`SIZE`]; the bottom panel asks for more pixels over the same area.
+    pub fn with_side(side: usize) -> Self {
+        Self {
+            tiles: FxHashMap::default(),
+            palette: None,
+            composed: None,
+            changed: false,
+            side,
+            image: Vec::new(),
+        }
+    }
+    /// The image's side in texels.
+    pub fn side(&self) -> usize {
+        self.side
+    }
     /// Forget everything (a new world or dimension, or the minimap turned off).
     pub fn clear(&mut self) {
+        let side = self.side;
         let palette = self.palette.take();
         *self = Self {
+            side,
             palette,
             ..Self::default()
         };
@@ -334,10 +358,11 @@ impl Minimap {
         }
         self.changed = false;
         self.composed = Some(view);
-        self.image.resize(SIZE * SIZE * 4, 0);
+        let side = self.side;
+        self.image.resize(side * side * 4, 0);
         let (r, f) = view.axes();
         let bpp = f64::from(view.blocks_per_pixel);
-        let half = SIZE as f64 / 2.0;
+        let half = side as f64 / 2.0;
         let mut cached: Option<((i32, i32), &Tile)> = None;
         let mut column = |x: i32, z: i32| -> Option<(u8, i16, u8)> {
             let key = (x >> 4, z >> 4);
@@ -352,10 +377,10 @@ impl Minimap {
             let i = ((z & 15) * 16 + (x & 15)) as usize;
             Some((tile.color[i], tile.height[i], tile.depth[i]))
         };
-        for j in 0..SIZE {
-            for i in 0..SIZE {
+        for j in 0..side {
+            for i in 0..side {
                 let (u, v) = (i as f64 + 0.5 - half, j as f64 + 0.5 - half);
-                let o = (j * SIZE + i) * 4;
+                let o = (j * side + i) * 4;
                 let edge = if view.round {
                     let d = (u * u + v * v).sqrt();
                     if d > half {
@@ -364,7 +389,7 @@ impl Minimap {
                     }
                     d > half - 1.5
                 } else {
-                    i == 0 || j == 0 || i == SIZE - 1 || j == SIZE - 1
+                    i == 0 || j == 0 || i == side - 1 || j == side - 1
                 };
                 if edge {
                     self.image[o..o + 4].copy_from_slice(&BORDER);

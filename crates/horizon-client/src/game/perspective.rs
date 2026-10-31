@@ -527,16 +527,33 @@ impl Game<'_> {
             return;
         }
         let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-        let x_angle = ((cx - self.cursor.0) / 40.0).atan();
-        let y_angle = ((cy - self.cursor.1) / 40.0).atan();
+        // The top inventory follows the mouse; the bottom screen eases from
+        // the last finger pose back to the camera.
+        let camera_blend = if self.second_inventory_preview {
+            self.second_preview_camera_blend
+        } else {
+            0.0
+        }
+        .clamp(0.0, 1.0);
+        let t = camera_blend * camera_blend * (3.0 - 2.0 * camera_blend);
+        let (x_angle, y_angle) = (
+            ((cx - self.cursor.0) / 40.0).atan(),
+            ((cy - self.cursor.1) / 40.0).atan(),
+        );
+        let lerp = |a: f32, b: f32| a + (b - a) * t;
+        let finger_body_yaw = 180.0 + x_angle * 20.0;
+        let finger_head_yaw = finger_body_yaw + x_angle * 20.0;
+        let finger_head_pitch = -y_angle * 20.0;
+        let finger_view_x = y_angle * 20.0;
         let mut m = m.clone();
-        // The render state: still, facing out, the head toward the cursor.
+        // The render state: still, facing out, the head toward the cursor,
+        // eased back toward the camera's pitch once the finger rests.
         m.previous = m.position;
-        m.body_yaw = 180.0 + x_angle * 20.0;
+        m.body_yaw = lerp(finger_body_yaw, 180.0);
         m.previous_body_yaw = m.body_yaw;
-        m.head_yaw = m.body_yaw + x_angle * 20.0;
+        m.head_yaw = lerp(finger_head_yaw, 180.0);
+        m.head_pitch = lerp(finger_head_pitch, self.pitch);
         m.previous_head_yaw = m.head_yaw;
-        m.head_pitch = -y_angle * 20.0;
         m.previous_head_pitch = m.head_pitch;
         m.position.y += 0.125 * f64::from(u8::from(m.extra.crouching));
         m.previous = m.position;
@@ -570,7 +587,7 @@ impl Game<'_> {
             * glam::Mat4::from_scale(glam::Vec3::new(size, size, -size))
             * glam::Mat4::from_translation(glam::Vec3::new(0.0, height / 2.0 + offset_y, 0.0))
             * glam::Mat4::from_rotation_z(std::f32::consts::PI)
-            * glam::Mat4::from_rotation_x((y_angle * 20.0).to_radians());
+            * glam::Mat4::from_rotation_x(lerp(finger_view_x, 0.0).to_radians());
         let fire = self
             .player
             .as_ref()
@@ -585,7 +602,7 @@ impl Game<'_> {
     }
     /// The survival inventory's player box (`InventoryScreen`).
     pub(super) fn draw_inventory_player(&self, batch: &mut HudBatch, ox: f32, oy: f32) {
-        if self.screen == Screen::Inventory {
+        if self.screen == Screen::Inventory || self.second_inventory_preview {
             self.draw_player_preview(
                 batch,
                 ox + 26.0,

@@ -883,6 +883,10 @@ impl Game<'_> {
     /// Chat or a sign opened by the pad in focus mode: the keyboard opens
     /// with it (once per screen; B closes it for good).
     fn pad_auto_keyboard(&mut self) {
+        // Android draws the bottom keyboard for chat/sign fields itself.
+        if cfg!(target_os = "android") {
+            return;
+        }
         let menu = &self.pad.menu;
         if menu.osk.is_none()
             && !menu.osk_dismissed
@@ -990,15 +994,15 @@ impl Game<'_> {
             ui.finish();
             return;
         }
-        let Some((x, y)) = self.pad.menu.pos else {
-            return;
-        };
         if self.pad_focus_mode()
             && let Some(focus) = self.pad.menu.focus
         {
             self.draw_pad_focus(batch, focus);
             return;
         }
+        let Some((x, y)) = self.pad.menu.pos else {
+            return;
+        };
         // An arrow, outlined, pointing up-left at (x, y).
         let atlas = &self.gui.atlas;
         let (x, y) = (x.floor(), y.floor());
@@ -1035,13 +1039,22 @@ impl Game<'_> {
     /// `EditBox`'s highlighted border).
     fn draw_pad_focus(&self, batch: &mut HudBatch, focus: Target) {
         let [x, y, w, h] = focus.rect;
+        let atlas = &self.gui.atlas;
         if matches!(focus.kind, Kind::Row | Kind::Field) {
-            let atlas = &self.gui.atlas;
             let white = rgba(255, 255, 255, 255);
             batch.fill(atlas, x, y, w, 1.0, white);
             batch.fill(atlas, x, y + h - 1.0, w, 1.0, white);
             batch.fill(atlas, x, y, 1.0, h, white);
             batch.fill(atlas, x + w - 1.0, y, 1.0, h, white);
+        } else {
+            // A crisp accent box, so the selection never depends on the
+            // hidden pointer's hover sprite having caught up yet.
+            let accent = rgba(0x8B, 0x7D, 0xE8, 230);
+            let t = 1.5;
+            batch.fill(atlas, x - t, y - t, w + t * 2.0, t, accent);
+            batch.fill(atlas, x - t, y + h, w + t * 2.0, t, accent);
+            batch.fill(atlas, x - t, y, t, h, accent);
+            batch.fill(atlas, x + w, y, t, h, accent);
         }
     }
 }
