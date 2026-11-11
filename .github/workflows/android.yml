@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANDROID_NDK_VERSION: 27.2.12479018
+      HORIZON_ANDROID_PROFILE: release
       ANDROID_KEYSTORE_BASE64: ${{ secrets.HORIZON_ANDROID_KEYSTORE_BASE64 }}
       HORIZON_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.HORIZON_ANDROID_KEYSTORE_PASSWORD }}
       HORIZON_ANDROID_KEY_ALIAS: ${{ secrets.HORIZON_ANDROID_KEY_ALIAS }}
@@ -54,16 +55,16 @@ jobs:
 
       - name: Configure release signing
         run: |
-          if [ -z "${ANDROID_KEYSTORE_BASE64}" ]; then
-            echo "No Android release keystore configured; Gradle will use its debug key."
-            exit 0
+          if [ -z "${ANDROID_KEYSTORE_BASE64}" ] || [ -z "${HORIZON_ANDROID_KEYSTORE_PASSWORD}" ] || [ -z "${HORIZON_ANDROID_KEY_ALIAS}" ]; then
+            echo "::error::Missing Android signing secrets. Set HORIZON_ANDROID_KEYSTORE_BASE64, HORIZON_ANDROID_KEYSTORE_PASSWORD and HORIZON_ANDROID_KEY_ALIAS in repository Settings > Secrets and variables > Actions."
+            exit 1
           fi
           keystore="$RUNNER_TEMP/horizon-release.keystore"
           printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "$keystore"
           {
             echo "HORIZON_ANDROID_KEYSTORE=$keystore"
             echo "HORIZON_ANDROID_KEYSTORE_PASSWORD=${HORIZON_ANDROID_KEYSTORE_PASSWORD}"
-            echo "HORIZON_ANDROID_KEY_ALIAS=${HORIZON_ANDROID_KEY_ALIAS:-horizon}"
+            echo "HORIZON_ANDROID_KEY_ALIAS=${HORIZON_ANDROID_KEY_ALIAS}"
           } >> "$GITHUB_ENV"
 
       - name: Build APK
