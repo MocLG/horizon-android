@@ -8,12 +8,12 @@ def staged = rootProject.file('build/stage')
 
 android {
     namespace 'com.lukagejak.horizon'
-    compileSdk 37
+    compileSdk 35
 
     defaultConfig {
         applicationId 'com.lukagejak.horizon'
         minSdk 29
-        targetSdk 37
+        targetSdk 35
         versionCode Integer.parseInt(project.findProperty('horizonVersionCode') ?: '1')
         versionName project.findProperty('horizonVersionName') ?: '0.1.0'
         ndk {

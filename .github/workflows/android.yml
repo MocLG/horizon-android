@@ -57,7 +57,7 @@ jobs:
         run: |
           sdkmanager --install \
             "platform-tools" \
-            "platforms;android-37" \
+            "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;${ANDROID_NDK_VERSION}"
           yes | sdkmanager --licenses >/dev/null || true
