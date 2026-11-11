@@ -322,6 +322,8 @@ pub fn install(app: &AndroidApp, paths: &Paths, log: &dyn Fn(String)) -> Result<
         minecraft_dir: Some(minecraft.clone()),
         server_jar: jar,
         java_home: Some(paths.jre.clone()),
+        inputs: Default::default(),
+        output: None,
     };
     log("Preparing Horizon's resources (this takes a few minutes)".into());
     horizon_prepare::prepare(&options, &|line| log(line.into()))?;
@@ -346,11 +348,10 @@ pub fn game_args(paths: &Paths) -> Result<Vec<String>, String> {
         paths.resources().display().to_string(),
     ];
     if account::client_id().is_some() {
-        let (session, _offline) =
-            account::session_for_game(&paths.home, false).map_err(|refused| {
-                format!("{refused} Sign in with your Microsoft account in the launcher.")
-            })?;
-        if let Some(file) = session {
+        let session = account::session_for_game(&paths.home).map_err(|refused| {
+            format!("{refused} Sign in with your Microsoft account in the launcher.")
+        })?;
+        if let Some(file) = session.file {
             args.push("--session-file".into());
             args.push(file.display().to_string());
         }

@@ -47,12 +47,25 @@ impl<A: Clone> Hits<A> {
     }
 }
 
-pub(super) const PLATE: u32 = color::hex(horizon_theme::DARK.surface, 240);
-pub(super) const RAISED: u32 = color::hex(horizon_theme::DARK.plate, 255);
-pub(super) const TEXT: u32 = color::TEXT;
-pub(super) const MUTED: u32 = color::MUTED;
-pub(super) const ACCENT: u32 = color::ACCENT;
-pub(super) const ON_ACCENT: u32 = color::ON_ACCENT;
+/// The panel behind menus and the editor: the overlay page, a little see through.
+pub(super) fn plate_fill() -> u32 {
+    color::with_alpha(color::bg(), 240.0 / 255.0)
+}
+pub(super) fn raised() -> u32 {
+    color::hover()
+}
+pub(super) fn text_ink() -> u32 {
+    color::text()
+}
+pub(super) fn muted() -> u32 {
+    color::muted()
+}
+pub(super) fn accent() -> u32 {
+    color::accent()
+}
+pub(super) fn on_accent() -> u32 {
+    color::on_accent()
+}
 
 pub(super) fn plate(ui: &mut Ui, r: Rect, radius: f32, colour: u32) {
     ui.rounded_px(
@@ -109,13 +122,13 @@ pub(super) fn button<A: Clone>(
     primary: bool,
     action: A,
 ) {
-    plate(ui, r, r.h / 2.0, if primary { ACCENT } else { RAISED });
+    plate(ui, r, r.h / 2.0, if primary { accent() } else { raised() });
     centred(
         ui,
         r,
         13.0,
         Face::Medium,
-        if primary { ON_ACCENT } else { TEXT },
+        if primary { on_accent() } else { text_ink() },
         label,
     );
     hits.push(action, r);
@@ -157,7 +170,7 @@ pub(super) fn slider<A: Clone>(
         r.y + (r.h - 13.0 * 1.45 * d) / 2.0,
         13.0,
         Face::Medium,
-        TEXT,
+        text_ink(),
         name,
     );
     let vw = text_width(ui, 12.0, Face::Regular, value);
@@ -167,7 +180,7 @@ pub(super) fn slider<A: Clone>(
         r.y + (r.h - 12.0 * 1.45 * d) / 2.0,
         12.0,
         Face::Regular,
-        MUTED,
+        muted(),
         value,
     );
     let track = Rect {
@@ -176,7 +189,7 @@ pub(super) fn slider<A: Clone>(
         w: r.w - label_w,
         h: 4.0 * d,
     };
-    plate(ui, track, track.h / 2.0, RAISED);
+    plate(ui, track, track.h / 2.0, raised());
     let f = fraction.clamp(0.0, 1.0);
     plate(
         ui,
@@ -185,7 +198,7 @@ pub(super) fn slider<A: Clone>(
             ..track
         },
         track.h / 2.0,
-        ACCENT,
+        accent(),
     );
     let knob = 16.0 * d;
     plate(
@@ -197,7 +210,7 @@ pub(super) fn slider<A: Clone>(
             h: knob,
         },
         knob / 2.0,
-        TEXT,
+        text_ink(),
     );
     hits.push(
         action,

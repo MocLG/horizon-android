@@ -471,6 +471,8 @@ impl Game<'_> {
     pub(in crate::game) fn draw_pad_over_hud(&self, batch: &mut horizon_client::hud::HudBatch) {
         self.draw_pad_radial(batch);
         self.draw_pad_cursor(batch);
+        #[cfg(target_os = "android")]
+        super::super::android::draw_touch(batch, &self.gui.atlas);
     }
 
     /// The overlay, over the HUD, in this player's view: while it shows, and while it fades out.

@@ -267,6 +267,10 @@ impl Loading {
         };
         let mut batch = HudBatch::new(size);
         self.draw_menu(&mut batch);
+        #[cfg(target_os = "android")]
+        if let Some(gui) = &self.gui {
+            super::android::draw_touch(&mut batch, &gui.atlas);
+        }
         self.menu.frame_drawn((batch.width, batch.height));
         let mut frame = loading_frame(&batch);
         frame.yaw = self.panorama_rotation.update(

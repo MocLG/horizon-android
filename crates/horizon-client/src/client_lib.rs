@@ -47,6 +47,7 @@ pub mod confirm_screen;
 pub mod container_screen;
 pub mod content_identity;
 pub mod control;
+pub mod controls;
 pub mod crafting;
 pub mod creative;
 pub mod cushion;

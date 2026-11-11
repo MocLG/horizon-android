@@ -24,7 +24,7 @@ pub fn preference(dir: &Path, key: &str) -> Option<String> {
     })
 }
 /// Set (or with None remove) one preference, keeping the others.
-pub(crate) fn set_preference(dir: &Path, key: &str, value: Option<&str>) {
+pub fn set_preference(dir: &Path, key: &str, value: Option<&str>) {
     let text = std::fs::read_to_string(dir.join("horizon.txt")).unwrap_or_default();
     let mut lines: Vec<String> = text
         .lines()
@@ -118,7 +118,37 @@ pub(crate) enum Face {
     SemiBold,
     /// Counts, timestamps and the boot screen's console lines.
     Mono,
+    /// The platform's interface font where it gave one (Roboto on Android,
+    /// as touch control layouts expect), else the regular face.
+    Control,
+    /// The platform's fonts for what the others lack (symbols), in turn.
+    Fallback0,
+    Fallback1,
+    Fallback2,
 }
+
+const FALLBACKS: [Face; 3] = [Face::Fallback0, Face::Fallback1, Face::Fallback2];
+
+/// The platform's fonts: the interface one, then fallbacks for characters
+/// the design system's lack. Set once, before anything draws text.
+static SYSTEM_FONTS: std::sync::OnceLock<(Option<&'static [u8]>, Vec<&'static [u8]>)> =
+    std::sync::OnceLock::new();
+
+pub fn set_system_fonts(interface: Option<Vec<u8>>, fallbacks: Vec<Vec<u8>>) {
+    let usable = |b: Vec<u8>| -> Option<&'static [u8]> {
+        let b: &'static [u8] = Box::leak(b.into_boxed_slice());
+        FontRef::try_from_slice(b).is_ok().then_some(b)
+    };
+    let _ = SYSTEM_FONTS.set((
+        interface.and_then(usable),
+        fallbacks
+            .into_iter()
+            .filter_map(usable)
+            .take(FALLBACKS.len())
+            .collect(),
+    ));
+}
+
 #[cfg(not(test))]
 const TEST_FONTS: Option<horizon_client_render::menu_style::Fonts> = None;
 #[cfg(test)]
@@ -130,7 +160,7 @@ const TEST_FONTS: Option<horizon_client_render::menu_style::Fonts> =
         mono: horizon_theme::fonts::GEIST_MONO,
     });
 struct Fonts {
-    faces: [FontRef<'static>; 4],
+    faces: Vec<FontRef<'static>>,
 }
 impl Fonts {
     /// The faces given in `menu_style`; none given, none (unit tests take the design system's).
@@ -139,17 +169,35 @@ impl Fonts {
             .fonts
             .or(TEST_FONTS)?;
         let f = |b: &'static [u8]| FontRef::try_from_slice(b).expect("given font");
-        Some(Self {
-            faces: [
-                f(given.regular),
-                f(given.medium),
-                f(given.semibold),
-                f(given.mono),
-            ],
-        })
+        let (interface, fallbacks) = SYSTEM_FONTS.get().cloned().unwrap_or_default();
+        let mut faces = vec![
+            f(given.regular),
+            f(given.medium),
+            f(given.semibold),
+            f(given.mono),
+            f(interface.unwrap_or(given.regular)),
+        ];
+        for i in 0..FALLBACKS.len() {
+            faces.push(f(fallbacks.get(i).copied().unwrap_or(given.regular)));
+        }
+        Some(Self { faces })
     }
     fn face(&self, f: Face) -> &FontRef<'static> {
         &self.faces[f as usize]
+    }
+    /// The face that draws `ch`: `face`, else the first fallback that has it.
+    fn resolve(&self, face: Face, ch: char) -> (Face, ab_glyph::GlyphId) {
+        let id = self.face(face).glyph_id(ch);
+        if id.0 != 0 || ch.is_whitespace() {
+            return (face, id);
+        }
+        for f in FALLBACKS.into_iter().chain([Face::Control, Face::Regular]) {
+            let id = self.face(f).glyph_id(ch);
+            if id.0 != 0 {
+                return (f, id);
+            }
+        }
+        (face, id)
     }
     /// The ab_glyph scale for an em size in pixels.
     fn scale(&self, f: Face, px: f32) -> PxScale {
@@ -472,6 +520,76 @@ impl<'a> Ui<'a> {
         self.raw_fill(x1 - r, y0 + r, x1, y1 - r, color);
         self.corners(x0, y0, x1, y1, r, false, color);
     }
+    /// A filled rectangle in physical pixels whose corners each have their
+    /// own radius: top left, top right, bottom right, bottom left.
+    pub(crate) fn rounded_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        radii: [f32; 4],
+        color: u32,
+    ) {
+        if color >> 24 == 0 || x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let half = ((x1 - x0) / 2.0).min((y1 - y0) / 2.0).floor();
+        let [tl, tr, br, bl] = radii.map(|r| r.round().clamp(0.0, half.max(0.0)));
+        let top = tl.max(tr);
+        let bottom = bl.max(br);
+        self.raw_fill(x0, y0 + top, x1, y1 - bottom, color);
+        self.raw_fill(x0 + tl, y0, x1 - tr, y0 + top, color);
+        self.raw_fill(x0, y0 + tl, x0 + tl, y0 + top, color);
+        self.raw_fill(x1 - tr, y0 + tr, x1, y0 + top, color);
+        self.raw_fill(x0 + bl, y1 - bottom, x1 - br, y1, color);
+        self.raw_fill(x0, y1 - bottom, x0 + bl, y1 - bl, color);
+        self.raw_fill(x1 - br, y1 - bottom, x1, y1 - br, color);
+        self.corner_at(x0, y0, tl, (false, false), false, color);
+        self.corner_at(x1 - tr, y0, tr, (true, false), false, color);
+        self.corner_at(x1 - br, y1 - br, br, (true, true), false, color);
+        self.corner_at(x0, y1 - bl, bl, (false, true), false, color);
+    }
+    /// A border `width` physical pixels wide, inside the edge of `rounded_px`'s shape.
+    pub(crate) fn border_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        radii: [f32; 4],
+        width: f32,
+        color: u32,
+    ) {
+        if color >> 24 == 0 || width < 1.0 || x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let half = ((x1 - x0) / 2.0).min((y1 - y0) / 2.0).floor();
+        let [tl, tr, br, bl] = radii.map(|r| r.round().clamp(0.0, half.max(0.0)));
+        let w = width.round().min(half);
+        self.raw_fill(x0 + tl, y0, x1 - tr, y0 + w, color);
+        self.raw_fill(x0 + bl, y1 - w, x1 - br, y1, color);
+        self.raw_fill(x0, y0 + tl, x0 + w, y1 - bl, color);
+        self.raw_fill(x1 - w, y0 + tr, x1, y1 - br, color);
+        // Concentric one-pixel rings make a corner of any width.
+        for i in 0..w as u32 {
+            let i = i as f32;
+            let ring = |r: f32| (r - i).max(0.0);
+            self.corner_at(x0 + i, y0 + i, ring(tl), (false, false), true, color);
+            self.corner_at(x1 - tr, y0 + i, ring(tr), (true, false), true, color);
+            self.corner_at(x1 - br, y1 - br, ring(br), (true, true), true, color);
+            self.corner_at(x0 + i, y1 - bl, ring(bl), (false, true), true, color);
+        }
+    }
+    fn corner_at(&mut self, x: f32, y: f32, r: f32, flip: (bool, bool), ring: bool, color: u32) {
+        if r < 1.0 {
+            return;
+        }
+        let atlas = self.atlas;
+        if let Some(rect) = with_cache(atlas, |c| c.corner(atlas, r as u16, ring)) {
+            self.corner_quad(rect, x, y, r, flip, color);
+        }
+    }
     /// A 1px rounded border.
     pub(crate) fn border(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32) {
         if color >> 24 == 0 {
@@ -521,22 +639,24 @@ impl<'a> Ui<'a> {
                 let f = fonts.face(face).as_scaled(scale);
                 (f.ascent(), f.descent())
             };
-            let chars: Vec<(char, Option<crate::font::Glyph>)> = unformatted(text)
-                .map(|ch| {
-                    let pack = (!ch.is_whitespace() && fonts.face(face).glyph_id(ch).0 == 0)
-                        .then(|| atlas.font.glyph(ch))
-                        // The pack lacks it too (its missing glyph): Geist's box, like vanilla's.
-                        .filter(|g| g.rect.is_some() || g.right <= 0.0);
-                    (ch, pack)
-                })
-                .collect();
-            let k = if chars.iter().all(|(_, g)| g.is_some()) {
+            let chars: Vec<(char, Face, ab_glyph::GlyphId, Option<crate::font::Glyph>)> =
+                unformatted(text)
+                    .map(|ch| {
+                        let (glyph_face, id) = fonts.resolve(face, ch);
+                        let pack = (!ch.is_whitespace() && id.0 == 0)
+                            .then(|| atlas.font.glyph(ch))
+                            // The pack lacks it too (its missing glyph): Geist's box, like vanilla's.
+                            .filter(|g| g.rect.is_some() || g.right <= 0.0);
+                        (ch, glyph_face, id, pack)
+                    })
+                    .collect();
+            let k = if chars.iter().all(|(_, _, _, g)| g.is_some()) {
                 gui
             } else {
                 (ascent - descent) / 9.0
             };
             let (mut pen, mut prev, mut quads) = (0.0, None, Vec::new());
-            for (ch, pack) in chars {
+            for (ch, glyph_face, id, pack) in chars {
                 if let Some(g) = pack {
                     if let (true, Some(rect)) = (draw, g.rect) {
                         // Vanilla's baseline is 7 below the line's top.
@@ -547,18 +667,22 @@ impl<'a> Ui<'a> {
                     prev = None;
                     continue;
                 }
-                let (id, advance, kern) = {
+                let (advance, kern) = {
                     let Some(fonts) = &c.fonts else {
                         break;
                     };
-                    let font = fonts.face(face);
-                    let id = font.glyph_id(ch);
-                    let f = font.as_scaled(scale);
-                    (id, f.h_advance(id), prev.map_or(0.0, |p| f.kern(p, id)))
+                    let f = fonts
+                        .face(glyph_face)
+                        .as_scaled(fonts.scale(glyph_face, px));
+                    let kern = match prev {
+                        Some((pf, p)) if pf == glyph_face => f.kern(p, id),
+                        _ => 0.0,
+                    };
+                    (f.h_advance(id), kern)
                 };
                 pen += kern;
                 if draw && !ch.is_whitespace() {
-                    let g = c.glyph(atlas, face, id, px);
+                    let g = c.glyph(atlas, glyph_face, id, px);
                     if let Some(rect) = g.rect {
                         quads.push((
                             (pen + g.left).round(),
@@ -570,7 +694,7 @@ impl<'a> Ui<'a> {
                     }
                 }
                 pen += advance;
-                prev = Some(id);
+                prev = Some((glyph_face, id));
             }
             (pen, ascent, descent, quads)
         })

@@ -6,7 +6,7 @@
 //! a button; Basic, Joystick, Directions and Style for a joystick. The
 //! toolbar adds buttons, text and joysticks, opens the layers, saves and
 //! leaves.
-use super::widgets::{self, Hits, MUTED, PLATE, TEXT};
+use super::widgets::{self, Hits, muted, plate_fill, text_ink};
 use super::*;
 use crate::ui_theme::Face;
 
@@ -1207,7 +1207,7 @@ impl Editor {
                 x1.round().max(x0.round() + 1.0),
                 y1.round().max(y0.round() + 1.0),
                 [0.0; 4],
-                widgets::ACCENT,
+                widgets::accent(),
             );
         }
         if let Some(w) = self.selected {
@@ -1219,7 +1219,7 @@ impl Editor {
                 (r.y + r.h + 2.0 * d).round(),
                 [4.0 * d; 4],
                 2.0 * d,
-                widgets::ACCENT,
+                widgets::accent(),
             );
             if let Some((x, y, rad)) = self.handle(screen) {
                 ui.rounded_px(
@@ -1228,7 +1228,7 @@ impl Editor {
                     (x + rad).round(),
                     (y + rad).round(),
                     [rad; 4],
-                    widgets::ACCENT,
+                    widgets::accent(),
                 );
                 ui.rounded_px(
                     (x - rad * 0.45).round(),
@@ -1236,7 +1236,7 @@ impl Editor {
                     (x + rad * 0.45).round(),
                     (y + rad * 0.45).round(),
                     [rad * 0.45; 4],
-                    widgets::ON_ACCENT,
+                    widgets::on_accent(),
                 );
             }
         }
@@ -1293,7 +1293,7 @@ impl Editor {
                 h: h + 12.0 * d,
             },
             (h + 12.0 * d) / 2.0,
-            PLATE,
+            plate_fill(),
         );
         for ((label, primary, action), w) in items.into_iter().zip(widths) {
             widgets::button(
@@ -1330,7 +1330,7 @@ impl Editor {
             w,
             h: screen.height - 64.0 * d,
         };
-        widgets::plate(ui, r, 12.0 * d, PLATE);
+        widgets::plate(ui, r, 12.0 * d, plate_fill());
         let mut tx = r.x + 10.0 * d;
         let th = 28.0 * d;
         for &(tab, label) in tabs {
@@ -1365,7 +1365,7 @@ impl Editor {
             r.y + (r.h - 13.0 * 1.45 * d) / 2.0,
             13.0,
             Face::Medium,
-            TEXT,
+            text_ink(),
             name,
         );
         let max = r.w - 120.0 * d;
@@ -1383,7 +1383,7 @@ impl Editor {
             r.y + (r.h - 12.0 * 1.45 * d) / 2.0,
             12.0,
             Face::Regular,
-            MUTED,
+            muted(),
             &value,
         );
     }
@@ -1887,14 +1887,14 @@ impl Editor {
             w: 520.0 * d,
             h: screen.height - 64.0 * d,
         };
-        widgets::plate(ui, r, 12.0 * d, PLATE);
+        widgets::plate(ui, r, 12.0 * d, plate_fill());
         widgets::text(
             ui,
             r.x + 14.0 * d,
             r.y + 14.0 * d,
             15.0,
             Face::Medium,
-            TEXT,
+            text_ink(),
             "Layers",
         );
         widgets::text(
@@ -1903,7 +1903,7 @@ impl Editor {
             r.y + 16.0 * d,
             12.0,
             Face::Regular,
-            MUTED,
+            muted(),
             "The first is on top. New widgets go to the selected one.",
         );
         let layers: Vec<(String, bool, Visibility, usize)> = self
@@ -1991,7 +1991,7 @@ impl Editor {
             w: screen.width - 48.0 * d,
             h: screen.height - 64.0 * d,
         };
-        widgets::plate(ui, r, 12.0 * d, PLATE);
+        widgets::plate(ui, r, 12.0 * d, plate_fill());
         let chosen: Vec<ClickEvent> = match (target, self.selected) {
             (PickFor::Events, Some(Selected::Button(l, i))) => self.controls.layout.layers[l]
                 .normal_buttons[i]

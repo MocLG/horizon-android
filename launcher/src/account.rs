@@ -12,6 +12,11 @@
 //!
 //! The Azure app (client ID) is Horizon's own and is configuration: `HORIZON_MSA_CLIENT_ID` at
 //! build time, or at run time to override it. Without one, sign-in says it is not configured.
+#[cfg(not(target_os = "android"))]
+pub mod session;
+// The Android app includes this file from another crate, where modules next to it are not found.
+#[cfg(target_os = "android")]
+#[path = "account/session.rs"]
 pub mod session;
 
 use serde_json::{json, Value};
@@ -39,6 +44,15 @@ const RENEW_BEFORE: u64 = 3600;
 /// The configured Azure app, if any: the run-time variable wins over the build-time one, and an
 /// empty value means none.
 pub fn client_id() -> Option<String> {
+    // The Android app has no environment to set: its settings keep the ID in a file.
+    #[cfg(target_os = "android")]
+    if let Some(id) = std::fs::read_to_string(crate::backend::data_dir().join("client-id.txt"))
+        .ok()
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+    {
+        return Some(id);
+    }
     std::env::var("HORIZON_MSA_CLIENT_ID")
         .ok()
         .or_else(|| option_env!("HORIZON_MSA_CLIENT_ID").map(str::to_owned))
@@ -167,6 +181,9 @@ pub enum Poll {
     Pending,
     /// The server asked to poll less often: wait 5 s more.
     SlowDown,
+    /// Microsoft could not be reached this time: a phone cuts the network of an app behind the
+    /// browser, so the wait goes on.
+    Unreachable(String),
     Done(MsTokens),
 }
 
@@ -214,7 +231,7 @@ fn oauth_error(v: &Value) -> String {
 
 /// One poll of the token endpoint while the player signs in.
 pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll, String> {
-    let (status, v) = send(
+    let sent = send(
         request_to("POST", &format!("{}/token", ep.microsoft)),
         Some(Body::Form(vec![
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -222,7 +239,11 @@ pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll, 
             ("device_code", &code.device_code),
         ])),
         "Microsoft",
-    )?;
+    );
+    let (status, v) = match sent {
+        Ok(sent) => sent,
+        Err(e) => return Ok(Poll::Unreachable(e)),
+    };
     match v.get("error").and_then(Value::as_str) {
         Some("authorization_pending") => return Ok(Poll::Pending),
         Some("slow_down") => return Ok(Poll::SlowDown),
@@ -251,6 +272,7 @@ pub fn wait_for_sign_in(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<MsTokens, String> {
     let mut interval = code.interval;
+    let mut unreachable = None;
     loop {
         let until = std::time::Instant::now() + Duration::from_secs(interval);
         while std::time::Instant::now() < until {
@@ -260,11 +282,14 @@ pub fn wait_for_sign_in(
             std::thread::sleep(Duration::from_millis(100));
         }
         if now() > code.expires_at {
-            return Err("The sign-in code expired. Start again.".into());
+            return Err(
+                unreachable.unwrap_or_else(|| "The sign-in code expired. Start again.".into())
+            );
         }
         match poll(ep, client_id, code)? {
-            Poll::Pending => {}
+            Poll::Pending => unreachable = None,
             Poll::SlowDown => interval += 5,
+            Poll::Unreachable(e) => unreachable = Some(e),
             Poll::Done(tokens) => return Ok(tokens),
         }
     }

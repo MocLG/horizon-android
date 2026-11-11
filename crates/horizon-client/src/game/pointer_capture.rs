@@ -213,7 +213,9 @@ impl Game<'_> {
             } else {
                 None
             };
-            self.captured = self.capture_mode.is_some();
+            self.captured = self.capture_mode.is_some()
+                // A touch screen has no pointer to grab: the look is always the game's.
+                || cfg!(target_os = "android");
             // Windows already warped above, inside the clip's own position.
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             if self.captured && self.focused {

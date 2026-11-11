@@ -1,7 +1,7 @@
 //! The game menu, after Zalith Launcher 2's floating ball: a ball over the
 //! game that drags anywhere and, tapped, opens the menu (the layout editor,
 //! gestures, the gyroscope, the controls' opacity, the keyboard).
-use super::widgets::{self, Hits, MUTED, PLATE, TEXT};
+use super::widgets::{self, Hits, muted, plate_fill, text_ink};
 use super::*;
 use crate::ui_theme::Face;
 
@@ -137,7 +137,7 @@ impl Menu {
             (x + r).round(),
             (y + r).round(),
             [r; 4],
-            PLATE,
+            plate_fill(),
         );
         ui.border_px(
             (x - r).round(),
@@ -146,7 +146,7 @@ impl Menu {
             (y + r).round(),
             [r; 4],
             1.0f32.max(d.round()),
-            widgets::ACCENT,
+            widgets::accent(),
         );
         widgets::centred(
             &mut ui,
@@ -158,7 +158,7 @@ impl Menu {
             },
             13.0,
             Face::SemiBold,
-            TEXT,
+            text_ink(),
             "H",
         );
         if self.open {
@@ -229,14 +229,14 @@ impl Menu {
                 w,
                 h,
             };
-            widgets::plate(&mut ui, p, 14.0 * d, PLATE);
+            widgets::plate(&mut ui, p, 14.0 * d, plate_fill());
             widgets::text(
                 &mut ui,
                 p.x + 18.0 * d,
                 p.y + 14.0 * d,
                 15.0,
                 Face::Medium,
-                TEXT,
+                text_ink(),
                 "Horizon",
             );
             widgets::text(
@@ -245,7 +245,7 @@ impl Menu {
                 p.y + 16.0 * d,
                 12.0,
                 Face::Regular,
-                MUTED,
+                muted(),
                 "Drag the ball anywhere",
             );
             let column = (p.w - 34.0 * d) / 2.0;

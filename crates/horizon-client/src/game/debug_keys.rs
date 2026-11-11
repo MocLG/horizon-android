@@ -334,6 +334,12 @@ impl Game<'_> {
             self.settings.force_unicode,
             [batch.width as i32, batch.height as i32],
         );
+        // A phone's cutout and curved edges hide the corners: the text keeps clear.
+        #[cfg(target_os = "android")]
+        let [left, top, right, _] = super::android::hud_margins().map(|m| m / batch.scale);
+        #[cfg(not(target_os = "android"))]
+        let [left, top, right] = [0.0f32; 3];
+        let width = width - ((left + right) / scale).ceil() as i32;
         let mut d = debug_overlay::Displayer::default();
         self.debug_entry_lines(&mut d, framebuffer);
         // The chart keys and the charts only while the overlay is open.
@@ -342,9 +348,17 @@ impl Game<'_> {
         } else {
             Vec::new()
         };
-        let (left, right) = d.columns(&footer);
+        let (left_lines, right_lines) = d.columns(&footer);
         let atlas = &self.gui.atlas;
-        let mut draws = debug_overlay::draw(&atlas.font, [&left, &right], scale, width);
+        let mut draws = vec![hud_layout::GuiDraw::Push(vec![
+            hud_layout::PoseOp::Translate(left, top),
+        ])];
+        draws.extend(debug_overlay::draw(
+            &atlas.font,
+            [&left_lines, &right_lines],
+            scale,
+            width,
+        ));
         if self.debug {
             let charts = self.debug_charts.draw(
                 &atlas.font,
@@ -369,6 +383,7 @@ impl Game<'_> {
             }
             draws.push(hud_layout::GuiDraw::Pop);
         }
+        draws.push(hud_layout::GuiDraw::Pop);
         hud_layout::paint(batch, atlas, &draws);
         self.debug_paint
             .borrow_mut()

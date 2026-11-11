@@ -90,6 +90,14 @@ pub(crate) fn draw_touch(batch: &mut HudBatch, atlas: &horizon_client::hud::HudA
     });
 }
 
+/// The game of the player at this device, once it has loaded.
+fn ready<'a>(app: &'a mut App) -> Option<&'a mut Game<'static>> {
+    match app {
+        App::Ready(split) => Some(&mut split.host),
+        App::Loading(_) => None,
+    }
+}
+
 fn with_overlay<R>(f: impl FnOnce(&mut Overlay) -> R) -> Option<R> {
     OVERLAY.with(|o| o.borrow_mut().as_mut().map(f))
 }
@@ -198,7 +206,6 @@ impl AndroidGame {
         let options = Options::from_args(args.into_iter())?.ok_or("no options")?;
         horizon_threads::put_helpers_behind();
         horizon_threads::favour_current();
-        horizon_client::heartbeat::start();
         let started = Instant::now();
         let vanilla_root = options.resources.clone();
         let home = std::env::current_dir()?;
@@ -291,7 +298,7 @@ impl AndroidGame {
             })
         });
         Ok(Self {
-            app: loading_app(options, settings, vanilla_root, None, started)?,
+            app: super::resource_loader::loading_app(options, settings, vanilla_root, None, started)?,
             home,
             contacts: HashMap::new(),
             buttons: Vec::new(),
@@ -313,9 +320,9 @@ impl AndroidGame {
     /// The game's error once it stopped the loop.
     pub(crate) fn error(&mut self) -> Option<Box<dyn std::error::Error>> {
         match &mut self.app {
-            App::Ready(game) => {
-                let _ = write_report(game);
-                game.error.take()
+            App::Ready(split) => {
+                let _ = write_report(&split.host);
+                split.host.error.take()
             }
             App::Loading(loading) => loading.error.take(),
         }
@@ -323,21 +330,22 @@ impl AndroidGame {
 
     fn window(&self) -> Option<&Arc<Window>> {
         match &self.app {
-            App::Ready(game) => game.window.as_ref(),
+            App::Ready(split) => split.host.window.as_ref(),
             App::Loading(loading) => loading.window.as_ref(),
         }
     }
 
     fn renderer(&mut self) -> Option<&mut Renderer> {
         match &mut self.app {
-            App::Ready(game) => game.renderer.as_mut(),
+            App::Ready(split) => split.host.renderer.as_mut(),
             App::Loading(loading) => loading.renderer.as_mut(),
         }
     }
 
     fn screen(&self) -> ControlScreen {
         let size = match &self.app {
-            App::Ready(game) => game
+            App::Ready(split) => split
+                .host
                 .renderer
                 .as_ref()
                 .map(|r| [r.config.width, r.config.height]),
@@ -359,7 +367,7 @@ impl AndroidGame {
     /// The world has the pointer, with nothing over it.
     fn in_game(&mut self) -> bool {
         match &mut self.app {
-            App::Ready(game) => game.touch_playing(),
+            App::Ready(split) => split.host.touch_playing(),
             App::Loading(_) => false,
         }
     }
@@ -383,7 +391,7 @@ impl AndroidGame {
                 renderer.resize(size.width, size.height);
             }
         }
-        if let App::Ready(game) = &mut self.app {
+        if let Some(game) = ready(&mut self.app) {
             game.audio.set_output(true);
         }
         if with_overlay(|o| o.settings.gyroscope).unwrap_or(false) {
@@ -408,7 +416,7 @@ impl AndroidGame {
         with_overlay(|o| o.controls.release_all());
         self.apply_control_events(event_loop);
         self.release_mouse_buttons();
-        if let App::Ready(game) = &mut self.app {
+        if let Some(game) = ready(&mut self.app) {
             game.audio.set_output(false);
         }
     }
@@ -523,7 +531,7 @@ impl AndroidGame {
             self.ask_keyboard(false);
             return;
         }
-        if let App::Ready(game) = &mut self.app
+        if let Some(game) = ready(&mut self.app)
             && let Err(e) = game.pad_back()
         {
             log::warn!("Horizon: back: {e}");
@@ -562,7 +570,7 @@ impl AndroidGame {
         let (gx, gy) = jni::take_gyro();
         if gyroscope
             && in_game
-            && let App::Ready(game) = &mut self.app
+            && let Some(game) = ready(&mut self.app)
         {
             game.mouse.on_move(
                 0.0,
@@ -577,7 +585,7 @@ impl AndroidGame {
         self.typed();
         self.timers(event_loop, now);
         for (button, _) in self.releases.extract_if(.., |(_, at)| now >= *at) {
-            if let App::Ready(game) = &mut self.app {
+            if let Some(game) = ready(&mut self.app) {
                 let _ = game.play_mouse(button, false);
             }
         }
@@ -589,7 +597,7 @@ impl AndroidGame {
             self.scrolling = Some((lines, now + Duration::from_millis(80)));
         }
         let editing = self.editing();
-        if let App::Ready(game) = &mut self.app {
+        if let Some(game) = ready(&mut self.app) {
             let typing = !editing
                 && (game.pad_typing()
                     || game
@@ -679,7 +687,7 @@ impl AndroidGame {
             return;
         }
         let back = typed.contains(&Typed::Back);
-        let App::Ready(game) = &mut self.app else {
+        let Some(game) = ready(&mut self.app) else {
             return;
         };
         for t in typed {
@@ -732,7 +740,7 @@ impl AndroidGame {
         if hold {
             self.menu_mouse(event_loop, id, MouseButton::Left, true);
         }
-        if let App::Ready(game) = &mut self.app {
+        if let Some(game) = ready(&mut self.app) {
             if drop {
                 tap_key(game, KeyCode::KeyQ);
                 jni::vibrate(15);
@@ -828,7 +836,7 @@ impl AndroidGame {
             self.buttons.retain(|b| *b != button);
         }
         if self.in_game() {
-            if let App::Ready(game) = &mut self.app {
+            if let Some(game) = ready(&mut self.app) {
                 let _ = game.play_mouse(button, pressed);
             }
         } else if let Some(id) = self.window().map(|w| w.id()) {
@@ -837,7 +845,7 @@ impl AndroidGame {
     }
 
     fn release_mouse_buttons(&mut self) {
-        if let App::Ready(game) = &mut self.app {
+        if let Some(game) = ready(&mut self.app) {
             for button in std::mem::take(&mut self.buttons) {
                 let _ = game.play_mouse(button, false);
             }
@@ -859,7 +867,7 @@ impl AndroidGame {
                         log::warn!("Horizon: the control layout's key {name} has no key here");
                         continue;
                     };
-                    if let App::Ready(game) = &mut self.app {
+                    if let Some(game) = ready(&mut self.app) {
                         // As a keyboard's key goes (window_event): held for the F3
                         // combinations, the debug keys first, then the game's.
                         if pressed {
@@ -880,7 +888,7 @@ impl AndroidGame {
                                 let _ = game.pad_back();
                             }
                         } else {
-                            let _ = game.mapped_key(key, pressed, false);
+                            let _ = game.mapped_key(key, pressed, false, key, Source::Keyboard);
                         }
                     }
                 }
@@ -898,7 +906,7 @@ impl AndroidGame {
                     _ => {}
                 },
                 ControlEvent::SendText(text) => {
-                    if let App::Ready(game) = &mut self.app {
+                    if let Some(game) = ready(&mut self.app) {
                         if game.screen != Screen::Chat {
                             tap_key(game, KeyCode::KeyT);
                         }
@@ -916,7 +924,7 @@ impl AndroidGame {
         match choice {
             Choice::EditControls => {
                 if self.in_game()
-                    && let App::Ready(game) = &mut self.app
+                    && let Some(game) = ready(&mut self.app)
                 {
                     // The world pauses behind the editor.
                     let _ = game.pad_back();
@@ -1001,7 +1009,7 @@ impl AndroidGame {
                     o.settings.debug_scale
                 })
                 .unwrap_or(0);
-                if let App::Ready(game) = &mut self.app {
+                if let Some(game) = ready(&mut self.app) {
                     game.settings
                         .file
                         .set("debugGuiScale", horizon_client::options_file::V::Int(next));
@@ -1014,7 +1022,7 @@ impl AndroidGame {
             }
             Choice::Pause => {
                 with_overlay(|o| o.menu.open = false);
-                if let App::Ready(game) = &mut self.app {
+                if let Some(game) = ready(&mut self.app) {
                     let _ = game.pad_back();
                 }
             }
@@ -1112,7 +1120,7 @@ impl AndroidGame {
                 let delta = (at.0 - last.0, at.1 - last.1);
                 match &mut contact.role {
                     Role::Look { .. } => {
-                        if let App::Ready(game) = &mut self.app {
+                        if let Some(game) = ready(&mut self.app) {
                             game.mouse.on_move(
                                 0.0,
                                 0.0,
@@ -1170,7 +1178,7 @@ impl AndroidGame {
                         }
                     }
                     Role::Look { gestures, held } => {
-                        if let App::Ready(game) = &mut self.app {
+                        if let Some(game) = ready(&mut self.app) {
                             if let Some(button) = held {
                                 let _ = game.play_mouse(button, false);
                             } else if gestures && quick {
@@ -1187,7 +1195,7 @@ impl AndroidGame {
                             .is_some_and(|(last, at)| last == slot && now - at < DOUBLE_TAP);
                         if double {
                             self.last_slot_tap = None;
-                            if let App::Ready(game) = &mut self.app {
+                            if let Some(game) = ready(&mut self.app) {
                                 tap_key(game, KeyCode::KeyF);
                             }
                         } else {
@@ -1273,7 +1281,7 @@ impl AndroidGame {
     }
 
     fn select_slot(&mut self, slot: usize) {
-        if let App::Ready(game) = &mut self.app {
+        if let Some(game) = ready(&mut self.app) {
             game.selected = slot;
         }
     }
@@ -1294,8 +1302,8 @@ fn set_larger_interface(on: bool) {
 }
 
 fn tap_key(game: &mut Game, key: KeyCode) {
-    let _ = game.mapped_key(key, true, false);
-    let _ = game.mapped_key(key, false, false);
+    let _ = game.mapped_key(key, true, false, key, Source::Keyboard);
+    let _ = game.mapped_key(key, false, false, key, Source::Keyboard);
 }
 
 /// Android's gamepad key codes (KeyEvent.KEYCODE_BUTTON_*) as the pad's buttons.
@@ -1490,7 +1498,7 @@ impl Game<'_> {
             && self.sign_edit.is_none()
             && self.book.is_none()
             && self.pending_entry.is_none()
-            && self.world_loader.is_none()
+            && self.integrated_starting.is_none()
             && !self.dialog_open()
             && self.server_packs.prompt.is_none()
     }
