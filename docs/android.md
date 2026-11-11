@@ -99,6 +99,17 @@ it with your key, else Gradle's debug key signs it. `HORIZON_EXPORTERS`
 names a release's `exporters` folder to ship when it was built from the
 same sources.
 
+For GitHub Actions (`.github/workflows/android.yml`), add these repository
+secrets in **Settings → Secrets and variables → Actions**:
+
+- `HORIZON_ANDROID_KEYSTORE_BASE64`: base64 of the release keystore file
+  (`base64 -w0 release.keystore` on Linux, `base64 release.keystore | tr -d '\n'` on macOS)
+- `HORIZON_ANDROID_KEYSTORE_PASSWORD`: keystore password
+- `HORIZON_ANDROID_KEY_ALIAS`: key alias inside the keystore
+
+The workflow requires all three and fails if any is missing, so published APKs
+stay release-signed.
+
 `HORIZON_ANDROID_PROFILE=android` builds the game without LTO, which
 links in a fraction of the time, and `HORIZON_ANDROID_JOBS` sets cargo's
 jobs: 4 by default, and 1 on a phone, where more run out of memory.

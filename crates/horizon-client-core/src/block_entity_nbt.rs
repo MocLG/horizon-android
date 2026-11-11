@@ -143,7 +143,9 @@ impl<'a> Fields<'a> {
     /// `RandomizableContainer.tryLoadLootTable` / `trySaveLootTable`; true when the
     /// block entity has a loot table (and so saves no items).
     fn loot_table(&mut self) -> bool {
-        let Some(table) = text(self.input.get("LootTable")) else {
+        let Some(table) =
+            text(self.input.get("LootTable")).and_then(|id| crate::identifier::normalize_id(&id))
+        else {
             return false;
         };
         self.put("LootTable", string(&table));
@@ -215,9 +217,10 @@ pub fn stack(tag: &Tag) -> Option<Tag> {
     Some(Tag::compound(out))
 }
 /// `ItemStackTemplate.CODEC`: an item id or `{id, count?, components?}`.
+/// Encoding uses the primary record form, including for a bare item id.
 fn template(tag: &Tag) -> Option<Tag> {
     match tag {
-        Tag::String(_) => Some(tag.clone()),
+        Tag::String(_) => Some(Tag::compound([("id", tag.clone())])),
         Tag::Compound(_) => {
             let mut out = vec![("id", string(&text(tag.get("id"))?))];
             if let Some(count) = int(tag.get("count")).filter(|c| *c != 1) {
@@ -494,7 +497,11 @@ pub fn canonical(tag: &Tag) -> Option<Tag> {
                     _ => string("minecraft:air"),
                 },
             );
-            f.put("facing", Tag::Int(int(tag.get("facing")).unwrap_or(0)));
+            // Direction.LEGACY_ID_CODEC: the 3D data value as a byte.
+            f.put(
+                "facing",
+                Tag::Byte(int(tag.get("facing")).unwrap_or(0) as i8),
+            );
             f.float("progress", 0.0);
             f.flag("extending", false);
             f.flag("source", false);
@@ -873,6 +880,23 @@ mod tests {
         );
     }
 
+    /// `PistonMovingBlockEntity.saveAdditional`: `facing` through
+    /// `Direction.LEGACY_ID_CODEC` (a byte), `progress` a float.
+    #[test]
+    fn moving_piston_fields_match_vanilla() {
+        let out = canon(
+            "{id:\"minecraft:piston\",x:1,y:2,z:3,blockState:{Name:\"minecraft:stone\"},\
+             facing:5,progress:0.5f,extending:1b,source:0b}",
+        );
+        assert_eq!(out.get("facing"), Some(&Tag::Byte(5)));
+        assert_eq!(out.get("progress"), Some(&f32_tag(0.5)));
+        assert_eq!(out.get("extending"), Some(&Tag::Byte(1)));
+        assert_eq!(out.get("source"), Some(&Tag::Byte(0)));
+        let fresh = canon("{id:\"minecraft:piston\",x:1,y:2,z:3}");
+        assert_eq!(fresh.get("facing"), Some(&Tag::Byte(0)));
+        assert_eq!(fresh.get("blockState"), Some(&string("minecraft:air")));
+    }
+
     #[test]
     fn loot_table_replaces_items_and_zero_seed_is_omitted() {
         let out = canon(
@@ -882,6 +906,16 @@ mod tests {
         assert!(out.get("Items").is_none());
         assert!(out.get("LootTableSeed").is_none());
         assert_eq!(out.get("LootTable"), Some(&string("minecraft:chests/x")));
+    }
+
+    #[test]
+    fn invalid_loot_table_leaves_items_intact() {
+        let out = canon(
+            "{id:\"minecraft:barrel\",x:1,y:2,z:3,LootTable:\"INVALID TABLE\",\
+             Items:[{Slot:0b,id:\"minecraft:stone\",count:1}]}",
+        );
+        assert!(out.get("Items").is_some());
+        assert!(out.get("LootTable").is_none());
     }
 
     #[test]
@@ -976,5 +1010,71 @@ mod tests {
             "slot 0 keeps its lore"
         );
         assert_eq!(items[1].get("count"), Some(&Tag::Int(5)));
+    }
+}
+
+#[cfg(test)]
+mod pot_template_tests {
+    use super::*;
+    use horizon_world::nbt::parse_snbt;
+
+    #[test]
+    fn decorated_pot_string_template_load_save_uses_item_compound() {
+        let parse = |s: &str| parse_snbt(s).expect("valid input NBT").0;
+        let input = |front: &str| {
+            let mut tag = parse(
+                r#"{id:"minecraft:decorated_pot",x:4,y:200,z:4,sherds:{back:{id:"minecraft:brick"},right:{id:"minecraft:archer_pottery_sherd"}},item:{id:"minecraft:wheat",count:3,components:{"minecraft:custom_name":"H290 item"}}}"#,
+            );
+            let Tag::Compound(root) = &mut tag else {
+                unreachable!()
+            };
+            let Some(Tag::Compound(sides)) = root.get_mut(&"sherds".into()) else {
+                unreachable!()
+            };
+            sides.insert("front".into(), parse(front));
+            tag
+        };
+        let other_fields = |loaded: &Tag, saved: &Tag| {
+            assert_eq!(saved.get("id"), loaded.get("id"));
+            for key in ["x", "y", "z", "item"] {
+                assert_eq!(saved.get(key), loaded.get(key), "{key}");
+            }
+            let loaded_sides = loaded.get("sherds").unwrap();
+            let saved_sides = saved.get("sherds").unwrap();
+            for side in ["back", "right"] {
+                assert_eq!(saved_sides.get(side), loaded_sides.get(side), "{side}");
+            }
+            assert_eq!(saved_sides.get("left"), None);
+        };
+        let plain = r#"{id:"minecraft:angler_pottery_sherd"}"#;
+        let defaults = r#"{id:"minecraft:angler_pottery_sherd",count:1,components:{}}"#;
+        let rich = r#"{id:"minecraft:angler_pottery_sherd",count:3,components:{"minecraft:custom_data":{h290:1},"minecraft:custom_name":"H290 sherd"}}"#;
+        // Actual canonical load/save entry, not the private template helper.
+        for (front, expected) in [(plain, plain), (defaults, plain), (rich, rich)] {
+            let loaded = input(front);
+            let original = loaded.clone();
+            let saved = canonical(&loaded).expect("actual decorated-pot codec");
+            other_fields(&loaded, &saved);
+            assert_eq!(
+                saved.get("sherds").unwrap().get("front"),
+                Some(&parse(expected))
+            );
+            assert_eq!(canonical(&saved).as_ref(), Some(&saved));
+            assert_eq!(loaded, original, "read-only canonicalization");
+        }
+        println!(
+            "H290 actual canonical compound/default/count/components, other sides/item/name and idempotency controls admitted"
+        );
+        let loaded = input(r#""minecraft:angler_pottery_sherd""#);
+        let original = loaded.clone();
+        let saved = canonical(&loaded).expect("actual decorated-pot codec");
+        other_fields(&loaded, &saved);
+        assert_eq!(loaded, original, "read-only canonicalization");
+        assert_eq!(
+            saved.get("sherds").unwrap().get("front"),
+            Some(&parse(plain)),
+            "string template must save the primary item compound",
+        );
+        assert_eq!(canonical(&saved).as_ref(), Some(&saved));
     }
 }

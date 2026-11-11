@@ -15,15 +15,17 @@ no port.
 Both sides' call graphs then show where a port exists but is not wired like vanilla, the kind of bug a
 method-by-method reading misses:
 
-- seam: a vanilla method ported on both paths (the in-frame game and the server-client side,
-  game/remote*.rs, or the server, game/lan*.rs), one of which reaches the port of a callee and the other
-  doesn't;
+- seam: a vanilla method ported on more than one path (the shared game code, the server-client side,
+  game/remote*.rs, or the server's network side, game/lan*.rs), one of which reaches the port of a callee
+  and another doesn't;
 - callee: a ported vanilla method whose ported callee no Rust counterpart reaches;
 - client: a vanilla effect only the client's copy draws (`addParticle`, `playLocalSound`,
   `itemUsed`, a `isClientSide()` branch) whose port nothing on the server-client side (game/remote*.rs)
   reaches;
 - class: a whole vanilla class nothing ports while most of its package is ported (a renderer, a sound
   instance, a goal: the game reaches those by registration, so no call graph shows them);
+- float: a port that spells a float literal its vanilla method widens to double (`0.3F` in a double sum is
+  0.30000001192092896) as the double 0.3;
 - drift: a port that never names what its vanilla method uses: a sound, particle, item, block, effect or
   game event, or a rare number (a missing sound or a changed constant);
 - stale: a citation whose class or method doesn't exist in the pinned version;
@@ -35,6 +37,7 @@ method-by-method reading misses:
     python3 tools/port_ledger.py what crates/horizon-client/src/game/spear.rs:150
     python3 tools/port_ledger.py class Shulker                 # every method: ported where, or not
     python3 tools/port_ledger.py issue 3123                    # the classes, code and gaps a report points at
+    python3 tools/port_ledger.py blame blaze v                 # what computes a field a parity trace shows differ
     python3 tools/port_ledger.py check [--base origin/main]    # what a branch touches, gaps it opens and closes
     python3 tools/port_ledger.py coverage [--package world/entity] [--depth 3]
     python3 tools/port_ledger.py gaps [--kind seam] [--package world/entity] [--limit 50]
@@ -407,7 +410,7 @@ def parse_java(path_and_root):
     path, root = path_and_root
     rel = os.path.relpath(path, root).replace(os.sep, "/")
     try:
-        text = open(path, encoding="utf-8", errors="replace").read()
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
     code, strings = blank_java(text)
@@ -599,6 +602,7 @@ def parse_class_bytes(item):
         "extends": [x for x in [cf.super] + cf.interfaces if x and not x.startswith("java/")],
         "methods": {}, "imports": {}, "package": name.rsplit("/", 1)[0],
         "outer": name.rsplit("$", 1)[0] if "$" in name else None, "fields": {}, "bytecode": True,
+        "declared_fields": {field.split(" ", 1)[0] for field in cf.fields},
     }
     if any(p[:1].isdigit() for p in name.rsplit("/", 1)[-1].split("$")[1:]):
         cls["anonymous"] = True
@@ -611,7 +615,8 @@ def parse_class_bytes(item):
         if access & 0x1000 and not owner.startswith("lambda$") or mname in ("$values", "values", "valueOf"):
             continue  # synthetic, and an enum's generated members
         m = cls["methods"].setdefault(target, {"name": target, "lines": [], "calls": set(), "tokens": set(),
-                                               "client": False, "size": 0, "touches": set()})
+                                               "client": False, "size": 0, "touches": set(), "promoted": set(),
+                                               "sets": set()})
         if code is None:
             m["abstract"] = not m["size"]
             continue
@@ -629,6 +634,11 @@ def parse_class_bytes(item):
             m["accessor"] = False
         for t in toks:
             op, _, rest = t.partition(" ")
+            if op in ("179", "181"):
+                # putstatic, putfield: the state it writes (`blame`).
+                fm = re.match(r"m:([\w/$]+)\.([\w$]+?)(?:L[\w/$]+;|\[.*|[BCDFIJSZ])$", rest)
+                if fm:
+                    m["sets"].add(fm.group(1).rsplit("/", 1)[-1] + "." + fm.group(2))
             if op in INVOKES and rest.startswith("m:"):
                 ref = rest[2:]
                 owner_cls, _, member = ref.partition(".")
@@ -673,6 +683,15 @@ def parse_class_bytes(item):
                 elif rest.startswith("d:"):
                     import struct as _s
                     v = _s.unpack(">d", bytes.fromhex(rest[2:]))[0]
+                    # A float literal widened to double (`vec.add(0.0, -0.04F, 0.0)`): javac folds it to the
+                    # float's value as a double, -0.03999999910593033, not -0.04. A double literal (0.04D)
+                    # is no float, and one a float holds exactly (0.5) is the same either way.
+                    if math.isfinite(v) and 1e-30 < abs(v) < 1e30 and _s.unpack(">f", _s.pack(">f", v))[0] == v:
+                        # The float's shortest spelling (0.04F): a double literal of it is another number.
+                        spelled = next(t for t in (f"{v:.{p}g}" for p in range(1, 10))
+                                       if _s.unpack(">f", _s.pack(">f", float(t)))[0] == v)
+                        if float(spelled) != v:
+                            m["promoted"].add(canonical_float(float(spelled)).lstrip("-"))  # `y - 0.04`: no sign
                     t2 = number_token(canonical_float(v))
                     if t2:
                         m["tokens"].add(t2)
@@ -688,6 +707,8 @@ def parse_class_bytes(item):
         m["calls"] = sorted(m["calls"])
         m["tokens"] = sorted(m["tokens"])
         m["touches"] = sorted(m["touches"])
+        m["promoted"] = sorted(m["promoted"])
+        m["sets"] = sorted(m["sets"])
     return cls
 
 
@@ -818,6 +839,28 @@ def parse_rust(path):
             if body[m.start(1) + len(name):m.start(1) + len(name) + 1] == "!":
                 continue
             calls.add(name)
+        # Float literals by the type their line gives them: `0.2_f32` and `f64::from(0.2_f32)` are a float's
+        # value, a bare `0.2` on a line that names f64 (or none) a double's.
+        f32s, f64s = set(), set()
+        for m in NUMBER.finditer(body):
+            lit = m.group(0)
+            if "." not in lit or lit.lower().startswith(("0x", "-0x")):
+                continue
+            try:
+                spelled = canonical_float(float(re.sub(r"_?(f32|f64|[fFdD])$", "", lit).replace("_", ""))).lstrip("-")
+            except ValueError:
+                continue
+            digits = len(re.sub(r"[^0-9]", "", re.split(r"[eE]", lit)[0]).strip("0"))
+            if lit.endswith("f32") or digits > 7:
+                # 0.2_f32, or the widened value written out (0.800000011920929, 9.9999997e-6).
+                f32s.add(spelled)
+                continue
+            line_text = body[body.rfind("\n", 0, m.start()) + 1:body.find("\n", m.end()) % (len(body) + 1)]
+            if lit.endswith("f64") or "f32" not in line_text and "next_float(" not in line_text:
+                f64s.add(spelled)
+            else:
+                f32s.add(spelled)
+        fn["f32"], fn["f64"] = sorted(f32s), sorted(f64s)
         # Typed calls: the receiver's type through self, params, lets and struct fields (resolved in build,
         # once every file's structs are known): [receiver path, method] with the path's root and fields.
         lets = {v: (core_type(t) if t else ty) for v, t, ty in RUST_LET.findall(body)}
@@ -893,6 +936,21 @@ def parse_rust(path):
         fn.pop("body", None)
         fn.pop("body_end", None)
     consts = {}
+    float_consts = {}  # NAME -> {"f32": [...], "f64": [...]}: what a fn naming it holds, for `float` gaps
+    for m in re.finditer(r"\b(?:const|static)\s+([A-Z][A-Z0-9_]*)\s*:\s*([^=;]+)=\s*([^;]+);", code):
+        floats = {"f32": [], "f64": []}
+        for n in NUMBER.finditer(m.group(3)):
+            lit = n.group(0)
+            if "." in lit and not lit.lower().startswith(("0x", "-0x")):
+                try:
+                    v = canonical_float(float(re.sub(r"_?(f32|f64|[fFdD])$", "", lit).replace("_", ""))).lstrip("-")
+                except ValueError:
+                    continue
+                digits = len(re.sub(r"[^0-9]", "", re.split(r"[eE]", lit)[0]).strip("0"))
+                is32 = lit.endswith("f32") or digits > 7 or "f32" in m.group(2) and not lit.endswith("f64")
+                floats["f32" if is32 else "f64"].append(v)
+        if floats["f32"] or floats["f64"]:
+            float_consts[m.group(1)] = floats
     for m in re.finditer(r"\b(?:const|static)\s+([A-Z][A-Z0-9_]*)\s*:\s*[^=;]+=\s*([^;]+);", code):
         toks = set()
         for n in NUMBER.finditer(m.group(2)):
@@ -905,7 +963,7 @@ def parse_rust(path):
         if toks:
             consts[m.group(1)] = sorted(toks)
     return {"file": path, "fns": fns, "file_comments": file_comments, "structs": structs, "trait_impls": trait_impls,
-            "consts": consts, "struct_lines": struct_lines}
+            "consts": consts, "float_consts": float_consts, "struct_lines": struct_lines}
 
 
 def rust_files():
@@ -1031,6 +1089,70 @@ def registry_aliases(sources, van):
     return out
 
 
+ORACLE_DIR = ROOT / "mods" / "horizon" / "src" / "test" / "java" / "dev" / "horizonlab" / "parity"
+
+
+def harness_coverage(van, methods, fns, edges, known):
+    """The parity harnesses that cover each ported method. A harness (tools/test_*_parity.py) runs a vanilla oracle
+    (mods/horizon/src/test/java/.../parity/*.java) and a Rust fixture (crates/*/examples/**/*_fixture.rs) on the same
+    inputs. It covers a method when its fixture reaches the method's port and the vanilla side is in reach too: the
+    oracle calls into the method, or the harness or oracle names the method's class (oracles often reach vanilla
+    through an interface, a block state for the block, which a call graph can't follow)."""
+    oracles = {p.stem: p for p in ORACLE_DIR.glob("*.java")} if ORACLE_DIR.is_dir() else {}
+    fixture_fns = defaultdict(list)  # the probes' example files: *_fixture.rs, *_probe.rs and the like
+    for fn in fns:
+        if "/examples/" in fn["file"]:
+            fixture_fns[fn["file"].rsplit("/", 1)[-1][:-3]].append(fn["id"])
+
+    def java_reach(names, depth=3):
+        keys = set()
+        for name in names:
+            text = oracles[name].read_text(encoding="utf-8", errors="replace")
+            imported = {m.group(2): m.group(1).replace(".", "/") + "/" + m.group(2)
+                        for m in re.finditer(r"^import\s+((?:net|com)\.minecraft[\w.]*|com\.mojang[\w.]*)\.([A-Z]\w*);", text, re.M)}
+            called = set(re.findall(r"\.(\w+)\s*\(", text)) | {m for _, m in re.findall(r"\b([A-Z]\w*)::(\w+)", text)}
+            for cp in imported.values():
+                if cp not in van.classes:
+                    continue
+                for meth in called:
+                    decl, _ = van.find_method(cp, meth)
+                    if decl:
+                        keys.add(key(decl, meth))
+        frontier = set(keys)
+        for _ in range(depth):
+            frontier = {c for k in frontier for c in methods.get(k, {}).get("callees", ())} - keys
+            keys |= frontier
+        return keys
+
+    def rust_reach(starts, depth=5):
+        seen = set(starts)
+        frontier = set(starts)
+        for _ in range(depth):
+            frontier = {c for f in frontier for c in edges.get(f, ())} - seen
+            seen |= frontier
+        return seen
+
+    covered = defaultdict(list)
+    for path in sorted((ROOT / "tools").glob("test_*_parity.py")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        tokens = set(re.findall(r"\w+", text))
+        names = tokens & oracles.keys()
+        fixtures = {n for n in tokens & fixture_fns.keys() if n.endswith(("_fixture", "_probe"))}
+        if not names or not fixtures:
+            continue
+        vkeys = java_reach(names)
+        rfns = rust_reach([f for n in fixtures for f in fixture_fns[n]])
+        words = set(re.findall(r"\b[A-Z]\w+", text + "".join(oracles[n].read_text(encoding="utf-8", errors="replace") for n in names)))
+        harness_name = path.stem.removeprefix("test_").removesuffix("_parity")
+        for k, fids in known.items():
+            if not fids & rfns:
+                continue
+            simple = methods[k]["class"].rsplit("/", 1)[-1] if k in methods else ""
+            if k in vkeys or simple.split("$")[0] in words:
+                covered[k].append(harness_name)
+    return dict(covered)
+
+
 def build(sources, jars, jobs):
     if not sources and not jars:
         sys.exit("No vanilla code: run `python3 tools/lab.py decompile`, or pass --sources DIR / --jar JAR.")
@@ -1077,6 +1199,7 @@ def build(sources, jars, jobs):
                 "size": m.get("size") or sum((b or a) - a + 1 for a, b in m["lines"]),
                 "bytecode": bool(c.get("bytecode")), "anonymous": bool(c.get("anonymous")),
                 "touches": [snake_case(f) for f in m.get("touches", ())],
+                "promoted": m.get("promoted", []), "sets": m.get("sets", []),
             }
     defined = defaultdict(set)
     for k, m in methods.items():
@@ -1179,8 +1302,12 @@ def build(sources, jars, jobs):
                     decl, meth = van.find_method(cp, member)
                     if not decl:
                         cls = van.classes[cp]
-                        fields = re.search(r"\b" + re.escape(member) + r"\b", open(os.path.join(next(s for s in sources if os.path.exists(os.path.join(s, cls["file"]))), cls["file"]), errors="replace").read()) if member[0].islower() else None
-                        if not fields:
+                        field = any(member in van.classes[p].get("declared_fields", ()) for p in van.lineage(cp))
+                        source = next((Path(s) / cls["file"] for s in sources if (Path(s) / cls["file"]).is_file()), None)
+                        if not field and source is not None and member[0].islower():
+                            field = bool(re.search(r"\b" + re.escape(member) + r"\b",
+                                                   source.read_text(encoding="utf-8", errors="replace")))
+                        if not field:
                             stale.append({"what": "method", "cite": f"{short(cp)}.{member}", "file": f["file"], "line": line})
                         continue
                     k = key(decl, member)
@@ -1214,6 +1341,11 @@ def build(sources, jars, jobs):
     for f in rust:
         for cname, toks in f["consts"].items():
             global_consts[cname].append(toks)
+    file_float_consts = {f["file"]: f["float_consts"] for f in rust}
+    global_float_consts = defaultdict(list)
+    for f in rust:
+        for cname, v in f["float_consts"].items():
+            global_float_consts[cname].append(v)
     for fn in fns:
         extra = set()
         for cname in fn.get("const_refs", ()):
@@ -1222,6 +1354,11 @@ def build(sources, jars, jobs):
                 toks = global_consts[cname][0]
             if toks:
                 extra.update(toks)
+            fc = file_float_consts.get(fn["file"], {}).get(cname)
+            if fc is None and len(global_float_consts.get(cname, ())) == 1:
+                fc = global_float_consts[cname][0]
+            for typ, vals in (fc or {}).items():
+                fn[typ] = sorted(set(fn.get(typ, ())) | set(vals))
         if extra:
             fn["tokens"] = sorted(set(fn["tokens"]) | extra)
         fn.pop("const_refs", None)
@@ -1616,6 +1753,8 @@ def build(sources, jars, jobs):
     for k, v in structural.items():
         known.setdefault(k, set()).add(v["fn"])
 
+    harness = harness_coverage(van, methods, fns, edges, known)
+
     def reach(fid, depth=5):
         """Names of the fns `fid` reaches within `depth` calls, and of the calls left unresolved."""
         seen, frontier = {fid}, {fid}
@@ -1645,14 +1784,14 @@ def build(sources, jars, jobs):
         return seen
 
     def side(fid):
-        """Which path a port runs on: the server-client side (game/remote*.rs), the server
-        (game/lan*.rs, src/lan/), or the in-frame game."""
+        """Which path a port runs on: the server-client side (game/remote*.rs), the server's network
+        side (game/lan*.rs, src/lan/), or the shared game code the server runs for its players."""
         f = fns[fid]["file"]
         if re.search(r"/game/remote[^/]*\.rs$", f):
             return "client"
         if re.search(r"/game/lan[^/]*\.rs$|/src/lan/", f):
             return "server"
-        return "frame"
+        return "game"
 
     def callee_port_names(c):
         """Names of the fns that port vanilla method c: those whose doc opens with it, else a fn with the
@@ -1714,11 +1853,8 @@ def build(sources, jars, jobs):
                 for i in miss:
                     peers = [h for h in hit if side(clusters[h][0]) != side(clusters[i][0]) and ccover[h] & ccover[i]]
                     if peers:
-                        # Singleplayer runs as a client of the integrated server, so a gap on the
-                        # in-frame path rarely shows; it sorts after the others.
                         gaps.append({"kind": "seam", "vanilla": k, "callee": callee, "fn": clusters[i][0],
-                                     "cluster": clusters[i], "sibling": clusters[peers[0]][0],
-                                     "old_path": side(clusters[i][0]) == "frame"})
+                                     "cluster": clusters[i], "sibling": clusters[peers[0]][0]})
             elif not hit and len(targets) <= 3 and substantial(callee):
                 gaps.append({"kind": "callee", "vanilla": k, "callee": callee, "fn": fids[0]})
         if m["client"] and not any(reached_from_remote(fid) for fid in fids):
@@ -1759,6 +1895,29 @@ def build(sources, jars, jobs):
         if missing_ids or missing_nums:
             main = max(fids, key=lambda f: fns[f]["end"] - fns[f]["line"])
             gaps.append({"kind": "drift", "vanilla": k, "fn": main, "ids": missing_ids, "numbers": missing_nums})
+
+    # Float: a port that spells a float literal vanilla widens to double as the double (0.3 for 0.3F).
+    ports = defaultdict(list)
+    for k, fids in ported.items():
+        ports[k] += [f for f in fids if not fns[f].get("test")]
+    for k, v in mapped.items():
+        if v["verdict"] in ("port", "inline") and v["fn"] not in ports[k]:
+            ports[k].append(v["fn"])
+    for k in set(ports) | set(mentioned):
+        m = methods.get(k)
+        if not m or not m["promoted"]:
+            continue
+        # A fn that names the method in a comment inside it (`// ItemEntity.setUnderwaterMovement`) often holds
+        # that part inline; its literals are the method's too.
+        fids = ports.get(k) or [f for f in mentioned.get(k, ()) if not fns[f].get("test")]
+        if fids:
+            # Look one call deep: the port often hands the motion to a helper.
+            near = set(fids) | {c for f in fids for c in edges.get(f, ()) if not fns[c].get("test")}
+            as32 = {v for f in near for v in fns[f].get("f32", ())}
+            wrong = [v for v in m["promoted"] if v not in as32 and any(v in fns[f].get("f64", ()) for f in near)]
+            if wrong:
+                where = next(f for f in sorted(near, key=lambda f: f not in fids) if set(wrong) & set(fns[f].get("f64", ())))
+                gaps.append({"kind": "float", "vanilla": k, "fn": where, "values": wrong})
 
     for s in stale:
         gaps.append({"kind": "stale", **s})
@@ -1807,6 +1966,7 @@ def build(sources, jars, jobs):
         "absent": absent,
         "homes": homes,
         "aliases": aliases,
+        "harness": harness,
         "inferred": inferred,
         "class_cites": {k: sorted(set(v)) for k, v in class_cites.items()},
         "file_class_cites": {k: sorted(v) for k, v in file_class_cites.items()},
@@ -1818,6 +1978,8 @@ def build(sources, jars, jobs):
         fn.pop("locals", None)
         fn.pop("params", None)
         fn.pop("words", None)
+        fn.pop("f32", None)
+        fn.pop("f64", None)
         fn["callees"] = sorted(edges.get(fn["id"], ()))
     OUT.mkdir(parents=True, exist_ok=True)
     LEDGER.write_text(json.dumps(ledger))
@@ -1924,6 +2086,7 @@ def method_view(led, k):
                 [f"skip:{led['skipped'][k]['reason']} {led['skipped'][k]['note']} ({led['skipped'][k]['src']})"] if k in led.get("skipped", {}) else
                 [f"missing {led['absent'][k]['note']} ({led['absent'][k]['src']})"] if k in led.get("absent", {}) else []),
         "class_home": led.get("homes", {}).get(m["class"]) or led.get("homes", {}).get(m["class"].split("$")[0], []),
+        "parity_harnesses": led.get("harness", {}).get(k, []),
         "inferred": [f"{fn_ref(led, i['fn'])} (score {i['score']}, shares {', '.join(i['shared'])})" for i in led["inferred"].get(k, [])],
         "client_effect": m["client"],
         "calls": [f"{short(led['methods'][c]['class'], led['methods'][c]['name'])} [{status_of(led, c)}]" for c in m["callees"] if c in led["methods"]][:40],
@@ -2029,7 +2192,7 @@ def gap_text(led, g):
         rest = [led["fns"][f]["name"] for f in g.get("cluster", [])[1:]]
         with_rest = f" (with {', '.join(rest)})" if rest else ""
         return (f"seam: {fn_ref(led, g['fn'])}{with_rest} ports {name(g['vanilla'])} but never reaches the port of "
-                f"{name(g['callee'])}; {fn_ref(led, g['sibling'])} does" + (" (old in-frame path)" if g.get("old_path") else ""))
+                f"{name(g['callee'])}; {fn_ref(led, g['sibling'])} does")
     if g["kind"] == "callee":
         return f"callee: {name(g['vanilla'])} calls {name(g['callee'])}; {fn_ref(led, g['fn'])} doesn't reach its port"
     if g["kind"] == "client":
@@ -2042,6 +2205,10 @@ def gap_text(led, g):
         if g["numbers"]:
             parts.append("lacks the constants " + ", ".join(t[2:] for t in g["numbers"][:8]))
         return f"drift: the port of {name(g['vanilla'])} ({fn_ref(led, g['fn'])}) " + " and ".join(parts)
+    if g["kind"] == "float":
+        vals = ", ".join(g["values"][:6])
+        return (f"float: {name(g['vanilla'])} widens the float literals {vals} to double; {fn_ref(led, g['fn'])} "
+                f"spells them as doubles (f64::from({g['values'][0]}_f32) is vanilla's value)")
     if g["kind"] == "class":
         return (f"class: nothing ports {short(g['vanilla_class'])} ({g['methods']} methods), though "
                 f"{round(100 * g['package_ported'])}% of {g['vanilla_class'].rsplit('/', 1)[0]} is ported")
@@ -2052,13 +2219,31 @@ def gap_text(led, g):
     return json.dumps(g)
 
 
-GAP_ORDER = {"map": -1, "seam": 0, "client": 1, "drift": 2, "class": 3, "callee": 4, "stale": 5}
+GAP_ORDER = {"map": -1, "seam": 0, "client": 1, "float": 2, "drift": 3, "class": 4, "callee": 5, "stale": 6}
 
 
 def gap_rank(g):
     """Best leads first: by kind, the live path before the old one, then the classes with the most ported neighbours."""
-    return (GAP_ORDER.get(g["kind"], 9), g.get("old_path", False), -g.get("package_ported", 0), -len(g.get("ids", ())),
+    return (GAP_ORDER.get(g["kind"], 9), -g.get("package_ported", 0), -len(g.get("ids", ())),
             g.get("vanilla") or g.get("vanilla_class") or g.get("file", ""))
+
+
+def untested(led, package=None, limit=50):
+    """Ported methods no parity harness covers, most-called first: where a harness would catch the most drift."""
+    harness = led.get("harness", {})
+    rows = []
+    for k, m in led["methods"].items():
+        if m["class"].startswith(SKIP_PACKAGES) or k in harness or m["name"].startswith("<"):
+            continue
+        if package and not m["class"].startswith("net/minecraft/" + package):
+            continue
+        # Sure pairs only (cited, or answered in the map), and methods with behaviour of their own.
+        if status_of(led, k) not in ("ported", "mapped") or m.get("accessor") or m.get("size", 0) <= 8:
+            continue
+        rows.append((len(led["callers"].get(k, [])), k))
+    rows.sort(reverse=True)
+    return [{"vanilla": short(led["methods"][k]["class"], led["methods"][k]["name"]), "callers": n,
+             "port": fn_ref(led, port_of(led, k)[0]) if port_of(led, k) else ""} for n, k in rows[:limit]]
 
 
 def unported(led, package=None, limit=50):
@@ -2083,6 +2268,9 @@ def unported(led, package=None, limit=50):
 def cmd_gaps(led, kind, package, limit, as_json):
     if kind == "unported":
         emit(unported(led, package, limit), as_json, "Nothing unported there.")
+        return
+    if kind == "untested":
+        emit(untested(led, package, limit), as_json, "Every port there has a parity harness.")
         return
     gaps = [g for g in led["gaps"] if (not kind or g["kind"] == kind)]
     if package:
@@ -2254,6 +2442,157 @@ def cmd_issue(led, ref, as_json):
             "gaps": [gap_text(led, g) for g in [g for g in gaps if g["kind"] != "callee"][:10] + [g for g in gaps if g["kind"] == "callee"][:3]],
         })
     emit(out, as_json, "The report names no vanilla class the ledger knows; try the class or item name.")
+
+
+# What a parity trace's fields are in vanilla: the fields that hold them and the setters that write them
+# (tools/test_mob_ai_parity.py prints p, v, r, ...). `blame` takes these or any field or setter name.
+TRACE_FIELDS = {
+    "p": (["position"], ["Entity.setPosRaw"]),
+    "v": (["deltaMovement"], ["Entity.setDeltaMovement", "Entity.addDeltaMovement"]),
+    "r": (["yRot", "xRot", "yHeadRot", "yBodyRot"], ["Entity.setYRot", "Entity.setXRot", "LivingEntity.setYHeadRot",
+                                                     "LivingEntity.setYBodyRot"]),
+    "g": (["onGround", "horizontalCollision"], ["Entity.setOnGround", "Entity.setOnGroundWithMovement"]),
+    "hp": ([], ["LivingEntity.setHealth"]),
+    "target": (["target"], ["Mob.setTarget"]),
+    "in": (["xxa", "yya", "zza", "speed", "jumping"], ["LivingEntity.setSpeed", "LivingEntity.setJumping",
+                                                      "Mob.setXxa", "Mob.setYya", "Mob.setZza"]),
+    "move": (["MoveControl.operation", "MoveControl.wantedX", "MoveControl.wantedY", "MoveControl.wantedZ",
+              "MoveControl.speedModifier", "MoveControl.strafeForwards", "MoveControl.strafeRight"],
+             ["MoveControl.setWantedPosition", "MoveControl.strafe"]),
+    "look": (["LookControl.lookAtCooldown", "LookControl.wantedX", "LookControl.wantedY", "LookControl.wantedZ"],
+             ["LookControl.setLookAt"]),
+}
+
+
+def blame(led, entity, keys, limit=8, ran=None, before=None):
+    """The vanilla methods a tick of `entity` runs that write the trace fields `keys` (directly or through their
+    setters), the entity's own class first, each with its Rust port and the ledger's gaps on it: where a value
+    that differs from vanilla's at some tick is computed. `ran` ({"Class.method": frames from the setter}, from a
+    recording of the vanilla run's setter calls that tick) puts what vanilla actually ran first, and of that what
+    it didn't run the tick before (`before`, the same for the last tick that matched) first of all: a value that
+    starts to differ at a tick most often comes from a step that tick added."""
+    methods, classes = led["methods"], led["classes"]
+    cps = [led.get("aliases", {}).get(entity.removeprefix("minecraft:"))] + match_classes(led, entity)
+    cp = next((c for c in cps if c), None)
+    if not cp:
+        return None
+    lineage, c = [], cp
+    while c in classes and c not in lineage:
+        lineage.append(c)
+        c = next((x for x in classes[c]["extends"] if x in classes and classes[x]["kind"] == "class"), None)
+    declared = defaultdict(set)
+    for k, m in methods.items():
+        declared[m["class"]].add(m["name"])
+
+    def dispatch(k, caller=None):
+        """A call of X.n on this entity runs the override nearest to its class (but `super.n()` from n runs X.n)."""
+        m = methods[k]
+        up = methods[caller]["class"] if caller else None
+        if up in lineage and methods[caller]["name"] == m["name"] and m["class"] in lineage[lineage.index(up) + 1:]:
+            return k
+        if m["class"] in lineage:
+            for c in lineage[:lineage.index(m["class"])]:
+                if m["name"] in declared[c]:
+                    return key(c, m["name"])
+        return k
+
+    roots = [dispatch(key(lineage[-1], "tick"))] if key(lineage[-1], "tick") in methods else []
+    # The entity's own code (below Mob and LivingEntity) and the goals it registers come first.
+    shared = next((i for i, c in enumerate(lineage) if c.rsplit("/", 1)[-1] in ("Mob", "LivingEntity", "Entity")),
+                  len(lineage))
+    own = set(lineage[:shared])
+    # Goals run by registration, which no call graph shows: the goals the entity's registerGoals builds.
+    for c in lineage:
+        for callee in methods.get(key(c, "registerGoals"), {}).get("callees", ()):
+            if callee.endswith("#<init>"):
+                gc = methods[callee]["class"]
+                own.add(gc)
+                roots += [k for k in (key(gc, n) for n in ("canUse", "canContinueToUse", "start", "stop", "tick"))
+                          if k in methods]
+    depth = {}
+    frontier = [dispatch(r) for r in roots if r in methods]
+    for d in range(12):
+        nxt = []
+        for k in frontier:
+            if k in depth:
+                continue
+            depth[k] = d
+            nxt += [dispatch(c, k) for c in methods[k]["callees"] if c in methods]
+        frontier = nxt
+    fields, setters = set(), set()
+    for k in keys:
+        f, st = TRACE_FIELDS.get(k, ([k], []))
+        fields |= set(f)
+        for name in st or ([k] if k[:1].islower() else []):
+            cls, _, meth = name.rpartition(".")
+            setters |= {key(c, meth) for c in (match_classes(led, cls) if cls else []) if key(c, meth) in methods}
+    gaps = defaultdict(list)
+    for g in led["gaps"]:
+        if g.get("vanilla"):
+            gaps[g["vanilla"]].append(g)
+
+    def writes(k):
+        for owner_field in methods[k].get("sets", ()):
+            owner, _, field = owner_field.partition(".")
+            if field in fields or owner.split("$")[-1] + "." + field in fields:
+                return True
+        return any(c in setters for c in methods[k]["callees"])
+
+    def entity_class(c):
+        seen = set()
+        while c in classes and c not in seen:
+            seen.add(c)
+            if c.endswith("/Entity"):
+                return True
+            c = next((x for x in classes[c]["extends"] if x in classes and classes[x]["kind"] == "class"), None)
+        return False
+
+    # A method of another entity class writes that entity's fields, not this one's; a constructor, the setter
+    # itself and loading saved data (a conversion copies it) aren't what a tick computes.
+    found = [k for k in depth if k not in setters and methods[k]["name"] not in
+             ("<init>", "<clinit>", "load", "readAdditionalSaveData", "restoreFrom", "snapTo", "copyPosition")
+             and (methods[k]["class"] in lineage or not entity_class(methods[k]["class"])) and writes(k)]
+    ran = ran or {}
+
+    def ran_at(k):
+        return ran.get(short(methods[k]["class"], methods[k]["name"]))
+
+    # What vanilla ran that wrote the field counts even where the call graph doesn't reach it (a goal another
+    # goal starts, a lambda).
+    found += [k for k, m in methods.items() if k not in depth and ran_at(k) is not None and k not in setters
+              and m["name"] not in ("<init>", "<clinit>") and writes(k)]
+    before = before or {}
+
+    def new_now(k):
+        return ran_at(k) is not None and short(methods[k]["class"], methods[k]["name"]) not in before
+
+    # What ran this tick and not the tick before, then what ran, nearest the setter first; then the entity's
+    # own code, by call depth.
+    found.sort(key=lambda k: (not new_now(k), ran_at(k) is None, ran_at(k) or 0, methods[k]["class"] not in own,
+                              depth.get(k, 99), k))
+    out = []
+    for k in found[:limit]:
+        out.append({"vanilla": short(methods[k]["class"], methods[k]["name"]), "depth": depth.get(k),
+                    "ran": ran_at(k) is not None, "new": new_now(k),
+                    "status": status_of(led, k), "rust": [fn_ref(led, f) for f in port_of(led, k)[:2]],
+                    "gaps": [gap_text(led, g) for g in sorted(gaps.get(k, ()), key=gap_rank)[:2]]})
+    return {"entity": short(cp), "fields": sorted(keys), "candidates": len(found), "computed_by": out}
+
+
+def cmd_blame(led, entity, keys, limit, as_json):
+    r = blame(led, entity, keys, limit)
+    if r is None:
+        sys.exit(f"No vanilla class or registry name {entity}.")
+    if as_json:
+        print(json.dumps(r, indent=1))
+        return
+    print(f"{r['entity']} {','.join(r['fields'])}: {r['candidates']} vanilla methods of its tick write it; "
+          "its own class first, then by call depth")
+    for c in r["computed_by"]:
+        where = f"depth {c['depth']}" if c["depth"] is not None else "outside the call graph"
+        print(f"- {c['vanilla']} ({where}, {c['status']}): {'; '.join(c['rust']) or 'no Rust port found'}")
+        for g in c["gaps"]:
+            print(f"    gap: {g}")
 
 
 def gap_identity(led, g):
@@ -2611,7 +2950,7 @@ def cmd_report(led):
         lines.append(f"| {p} | {c['total']} | " + " | ".join(str(c[k]) for k in COVERAGE_COLS) + f" | {found_pct(c):.0f} |")
     counts = Counter(g["kind"] for g in led["gaps"])
     lines += ["", "## Gaps", "", ", ".join(f"{k}: {v}" for k, v in counts.most_common()), ""]
-    for kind, title in (("seam", "Ported on both paths (in-frame and server-client), wired on only one"),
+    for kind, title in (("seam", "Ported on more than one path, wired on only one"),
                         ("client", "Client-only effects the server-client path never reaches"),
                         ("drift", "Ports that never name a sound, particle, item or constant vanilla uses"),
                         ("class", "Whole classes nothing ports, next to ported neighbours"),
@@ -2670,7 +3009,7 @@ def main():
     c.add_argument("--package")
     c.add_argument("--depth", type=int, default=2)
     g = sub.add_parser("gaps")
-    g.add_argument("--kind", choices=["seam", "client", "drift", "class", "callee", "stale", "map", "unported"])
+    g.add_argument("--kind", choices=["seam", "client", "float", "drift", "class", "callee", "stale", "map", "unported", "untested"])
     g.add_argument("--package")
     g.add_argument("--limit", type=int, default=50)
     sub.add_parser("report")
@@ -2685,6 +3024,10 @@ def main():
     ck = sub.add_parser("check", help="what a branch's changes touch: ports, their open gaps, citations to add")
     ck.add_argument("--base", default="origin/main")
     ck.add_argument("--no-compare", action="store_true", help="skip building the base to list gaps opened and closed")
+    bl = sub.add_parser("blame", help="which vanilla methods compute a traced field of an entity, and their ports")
+    bl.add_argument("entity", help="a class (Blaze) or registry name (blaze)")
+    bl.add_argument("fields", nargs="+", help="trace keys (p v r g hp target in move look) or field/setter names")
+    bl.add_argument("--limit", type=int, default=8)
     sub.add_parser("issue", help="the vanilla classes, Rust code and gaps a bug report points at").add_argument(
         "ref", help=f"an issue number on {ISSUE_REPO}, the report's text, or - to read it from stdin")
     args = parser.parse_args()
@@ -2697,7 +3040,8 @@ def main():
             tot.update(r)
         print(f"{len(led['methods'])} vanilla methods, {len(led['fns'])} Rust functions; of {tot['total']} outside the "
               f"skipped packages: " + ", ".join(f"{tot[k]} {k}" for k in COVERAGE_COLS)
-              + f" ({found_pct(tot):.0f}% of those worth porting found, {classified_pct(tot):.0f}% of all answered); gaps: "
+              + f" ({found_pct(tot):.0f}% of those worth porting found, {classified_pct(tot):.0f}% of all answered;"
+              f" {len(led.get('harness', {}))} covered by a parity harness); gaps: "
               + ", ".join(f"{k} {v}" for k, v in Counter(gg['kind'] for gg in led['gaps']).most_common())
               + f" -> {LEDGER}")
         return
@@ -2714,6 +3058,8 @@ def main():
         cmd_gaps(led, args.kind, args.package, args.limit, args.json)
     elif args.cmd == "report":
         cmd_report(led)
+    elif args.cmd == "blame":
+        cmd_blame(led, args.entity, args.fields, args.limit, args.json)
     elif args.cmd == "issue":
         cmd_issue(led, args.ref, args.json)
     elif args.cmd == "diff":

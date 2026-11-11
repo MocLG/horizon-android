@@ -1,0 +1,84 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_VERSION: 27.2.12479018
+      HORIZON_ANDROID_PROFILE: release
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.HORIZON_ANDROID_KEYSTORE_BASE64 }}
+      HORIZON_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.HORIZON_ANDROID_KEYSTORE_PASSWORD }}
+      HORIZON_ANDROID_KEY_ALIAS: ${{ secrets.HORIZON_ANDROID_KEY_ALIAS }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang lld python3 xz-utils zip
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-37" \
+            "build-tools;35.0.0" \
+            "ndk;${ANDROID_NDK_VERSION}"
+          yes | sdkmanager --licenses >/dev/null || true
+
+      - name: Configure release signing
+        run: |
+          if [ -z "${ANDROID_KEYSTORE_BASE64}" ] || [ -z "${HORIZON_ANDROID_KEYSTORE_PASSWORD}" ] || [ -z "${HORIZON_ANDROID_KEY_ALIAS}" ]; then
+            echo "::error::Missing Android signing secrets. Set HORIZON_ANDROID_KEYSTORE_BASE64, HORIZON_ANDROID_KEYSTORE_PASSWORD and HORIZON_ANDROID_KEY_ALIAS in repository Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          keystore="$RUNNER_TEMP/horizon-release.keystore"
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "$keystore"
+          {
+            echo "HORIZON_ANDROID_KEYSTORE=$keystore"
+            echo "HORIZON_ANDROID_KEYSTORE_PASSWORD=${HORIZON_ANDROID_KEYSTORE_PASSWORD}"
+            echo "HORIZON_ANDROID_KEY_ALIAS=${HORIZON_ANDROID_KEY_ALIAS}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build APK
+        run: android/build.sh
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HORIZON_ANDROID_REPO: ${{ github.repository }}
+        run: android/release.sh
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: horizon-android-apk
+          path: android/build/horizon-*-android-arm64.apk
+          if-no-files-found: error

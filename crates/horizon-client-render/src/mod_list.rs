@@ -12,6 +12,11 @@ use std::{
 pub const FILE: &str = "horizon-mods.txt";
 /// The folder holding `.hmod` files, beside `options.txt`.
 pub const DIR: &str = "horizon-mods";
+/// Where the launcher installs native mods (`<id>.hnmod`), beside [`DIR`]. They run only in a
+/// game the launcher built with them.
+pub const NATIVE_DIR: &str = "horizon-native-mods";
+/// Why a native mod installed in [`NATIVE_DIR`] doesn't run in this game.
+pub const NOT_BUILT: &str = "Installed, not built into this game: build the game with it in the launcher (Settings > Native mods), then play the instance that build is in.";
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModList {
@@ -36,11 +41,8 @@ pub struct Installed {
     pub description: String,
     /// Why it is not running, when it failed.
     pub problem: Option<String>,
-    /// Loaded with `--dev-mod`: always on, reloaded when rebuilt.
+    /// Loaded with `--dev-mod`: always on.
     pub dev: bool,
-    /// The running mod set a page of widgets (capability `ui`): its row
-    /// gains a Settings button.
-    pub has_settings: bool,
     /// A native mod (`game/native_hooks.rs`): built into the game, on until
     /// the player turns it off, and its settings page.
     pub native: Option<NativePage>,
@@ -129,6 +131,16 @@ impl ModList {
     /// Turns installed mod `i` on or off (a dev mod stays on). A native mod's
     /// line says `false` when off, so that the launcher's next build leaves
     /// it out, and `true` when on again.
+    /// Turn the installed mod `id` on (nothing when it isn't installed).
+    pub fn turn_on(&mut self, id: &str) {
+        let Some(m) = self.installed.iter().find(|m| m.id == id && !m.dev) else {
+            return;
+        };
+        if m.native.is_some() {
+            self.disabled.remove(&m.id);
+        }
+        self.enabled.insert(m.id.clone());
+    }
     pub fn toggle(&mut self, i: usize) {
         let Some(m) = self.installed.get(i).filter(|m| !m.dev) else {
             return;
@@ -178,7 +190,6 @@ mod tests {
             description: String::new(),
             problem: None,
             dev,
-            has_settings: false,
             native: None,
         };
         let mut list = ModList {
