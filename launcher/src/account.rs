@@ -151,6 +151,7 @@ impl std::fmt::Debug for DeviceCode {
 }
 
 /// The Microsoft tokens; the access token only lasts for the Xbox step.
+#[derive(Clone)]
 pub struct MsTokens {
     access: String,
     refresh: String,
@@ -1657,8 +1658,6 @@ impl SecretStore for SystemStore {
         true
     }
 }
-
-pub const NO_KEYCHAIN: &str = "No keychain available: you are signed in until the launcher closes, then you will have to sign in again.";
 
 /// The OS keychain if it answers, else why not.
 fn keychain_or_why() -> Result<Box<dyn SecretStore>, String> {
