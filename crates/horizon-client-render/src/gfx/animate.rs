@@ -64,7 +64,7 @@ enum Writer {
     },
 }
 
-pub(super) struct SpriteAnimator {
+pub(crate) struct SpriteAnimator {
     sprites: Vec<Sprite>,
     groups: Vec<Group>,
     writer: Writer,
@@ -72,9 +72,87 @@ pub(super) struct SpriteAnimator {
     size: u32,
     /// The layers the last `animate` rewrote, counted over all arrays.
     changed: Vec<u32>,
+    /// Whether each sprite layer has an animation.
+    is_animated: Vec<bool>,
+    /// What the sprites' Polytone animation `mode`s read.
+    modes: AnimationModes,
+}
+
+/// The sprites' Polytone animation `mode` expressions, compiled, and what the modes read this
+/// frame (the time of day, the weather, each expression's value).
+#[derive(Default)]
+struct AnimationModes {
+    programs: Vec<(String, horizon_polytone::expr::Program)>,
+    day_time: i64,
+    weather: f32,
+    values: std::collections::HashMap<String, f64>,
+    /// The open screen (an identity the game picks) and the ticks it has been open.
+    screen: Option<u64>,
+    screen_time: i64,
+}
+
+impl AnimationModes {
+    fn new(animations: &[SpriteAnimation]) -> Self {
+        let mut programs: Vec<(String, horizon_polytone::expr::Program)> = Vec::new();
+        for animation in animations {
+            if let Some(horizon_assets::animation::ClipMode::Expression(source)) = animation.mode()
+                && !programs.iter().any(|(s, _)| s == source)
+            {
+                match horizon_polytone::expr::Program::compile(source) {
+                    Ok(program) => programs.push((source.clone(), program)),
+                    Err(e) => log::warn!("animation mode {source:?}: {e}"),
+                }
+            }
+        }
+        Self {
+            programs,
+            ..Default::default()
+        }
+    }
+}
+
+impl super::Renderer {
+    /// What the packs' Polytone animation modes read this frame: the time of day, the weather and,
+    /// for expressions, the packs' frame (none without a Polytone pack: those animations wait).
+    pub fn set_animation_inputs(
+        &mut self,
+        day_time: i64,
+        [rain, thunder]: [f32; 2],
+        frame: Option<&crate::environment::Frame>,
+        screen: Option<u64>,
+    ) {
+        let modes = &mut self.animations.modes;
+        // `screen_time`: a tick more while the same screen stays open, from 0 on a new one.
+        modes.screen_time = match (screen, modes.screen) {
+            (Some(open), Some(was)) if open == was => modes.screen_time + 1,
+            _ => 0,
+        };
+        modes.screen = screen;
+        modes.day_time = day_time;
+        modes.weather = rain + thunder;
+        modes.values.clear();
+        if let Some(frame) = frame {
+            for (source, program) in &modes.programs {
+                let configs = Default::default();
+                if let Some(value) = crate::environment::eval_frame(program, frame, &configs) {
+                    modes.values.insert(source.clone(), value.num());
+                }
+            }
+        }
+    }
 }
 
 impl SpriteAnimator {
+    /// What the modes read this frame, for the GUI atlas's sprites (their expressions aren't
+    /// compiled: those run on ticks).
+    pub(crate) fn mode_inputs(&self) -> horizon_assets::animation::ModeInputs<'static> {
+        horizon_assets::animation::ModeInputs {
+            day_time: self.modes.day_time,
+            screen_time: self.modes.screen_time,
+            weather: self.modes.weather,
+            expression: &|_| None,
+        }
+    }
     /// `textures` are the sprite arrays, `split` layers each, `size` pixels
     /// wide; `animations` hold their frames at that size. `compute`: whether
     /// the device says it runs compute shaders writing storage textures.
@@ -103,10 +181,11 @@ impl SpriteAnimator {
         let mut counts: Vec<usize> = Vec::new();
         let mut sprites = Vec::with_capacity(animations.len());
         for animation in animations {
-            let chains: Vec<_> = (0..animation.frame_count())
-                .map(|frame| source_chain(animation.pixels(frame), size, settings, animation.layer))
+            let pixels: Vec<_> = (0..animation.frame_count())
+                .map(|frame| animation.pixels(frame))
                 .collect();
-            let bytes: u64 = chains.iter().map(|(chain, _)| chain.len() as u64).sum();
+            let (chains, edge) = source_chains(&pixels, size, settings, animation.layer);
+            let bytes: u64 = chains.iter().map(|chain| chain.len() as u64).sum();
             if bytes > limit {
                 log::warn!(
                     "Horizon: layer {}'s animation ({bytes} bytes) does not fit in a storage buffer; it stays still",
@@ -124,7 +203,7 @@ impl SpriteAnimator {
             let data = &mut frames[buffer];
             let offsets = chains
                 .iter()
-                .map(|(chain, _)| {
+                .map(|chain| {
                     let offset = (data.len() / 4) as u32;
                     data.extend_from_slice(chain);
                     offset
@@ -142,11 +221,16 @@ impl SpriteAnimator {
                 shown: None,
                 layer: animation.layer % split,
                 frames: offsets,
-                edge: chains[0].1,
+                edge,
                 group,
             });
         }
-        let Some(pipeline) = pipeline else {
+        let max_layer = animations.iter().map(|a| a.layer).max().unwrap_or(0);
+        let mut is_animated = vec![false; (max_layer + 1) as usize];
+        for a in animations {
+            is_animated[a.layer as usize] = true;
+        }
+        let Some((pipeline, layout)) = pipeline else {
             let groups = keys
                 .iter()
                 .zip(&counts)
@@ -167,6 +251,8 @@ impl SpriteAnimator {
                 },
                 size,
                 changed: Vec::new(),
+                is_animated,
+                modes: AnimationModes::new(animations),
             };
         };
         let frames: Vec<_> = frames
@@ -192,7 +278,6 @@ impl SpriteAnimator {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let layout = pipeline.get_bind_group_layout(0);
         let groups = keys
             .iter()
             .zip(&counts)
@@ -247,7 +332,22 @@ impl SpriteAnimator {
             writer: Writer::Gpu { jobs, pipeline },
             size,
             changed: Vec::new(),
+            is_animated,
+            modes: AnimationModes::new(animations),
         }
+    }
+
+    /// Whether the sprite layer has an animation.
+    pub fn is_animated(&self, layer: u16) -> bool {
+        self.is_animated
+            .get(layer as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Number of words needed to mark the animated layers visible this frame.
+    pub fn active_layer_words(&self) -> usize {
+        self.is_animated.len().div_ceil(u64::BITS as usize)
     }
 
     /// Whether the jobs can run on the GPU: compute shaders writing a
@@ -268,15 +368,41 @@ impl SpriteAnimator {
         &self.changed
     }
 
-    /// Show every sprite's frame at `tick`, rewriting only the sprites whose
-    /// frame or mix changed (`SpriteContents.AnimationState.tick`).
-    pub fn animate(
+    /// [`Self::animate_with`] with the Polytone animation modes' inputs the renderer was last given.
+    pub fn animate_modes(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         uploads: &mut Uploads,
         tick: u64,
+        active: Option<&[u64]>,
+        timing: Option<&mut super::pack_timing::PassTiming>,
     ) {
-        if self.collect(tick) == 0 {
+        let values = std::mem::take(&mut self.modes.values);
+        let expression = |source: &str| values.get(source).copied();
+        let inputs = horizon_assets::animation::ModeInputs {
+            day_time: self.modes.day_time,
+            screen_time: self.modes.screen_time,
+            weather: self.modes.weather,
+            expression: &expression,
+        };
+        self.animate_with(encoder, uploads, tick, Some(&inputs), active, timing);
+        self.modes.values = values;
+    }
+
+    /// Show every sprite's frame at `tick` (or what a Polytone `mode` picks from `inputs`),
+    /// rewriting only the sprites whose frame or mix changed
+    /// (`SpriteContents.AnimationState.tick`), skipping sprites not present in `active` when
+    /// provided.
+    pub fn animate_with(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        uploads: &mut Uploads,
+        tick: u64,
+        inputs: Option<&horizon_assets::animation::ModeInputs>,
+        active: Option<&[u64]>,
+        timing: Option<&mut super::pack_timing::PassTiming>,
+    ) {
+        if self.collect(tick, inputs, active) == 0 {
             return;
         }
         let (jobs, pipeline) = match &self.writer {
@@ -317,7 +443,7 @@ impl SpriteAnimator {
         }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Animated sprites"),
-            timestamp_writes: None,
+            timestamp_writes: timing.and_then(|t| t.compute_writes("Animated sprites")),
         });
         pass.set_pipeline(pipeline);
         for group in &mut self.groups {
@@ -336,11 +462,24 @@ impl SpriteAnimator {
 
     /// Queue a job for every sprite whose blend at `tick` differs from what
     /// its layer shows; the number of jobs.
-    fn collect(&mut self, tick: u64) -> usize {
+    fn collect(
+        &mut self,
+        tick: u64,
+        inputs: Option<&horizon_assets::animation::ModeInputs>,
+        active: Option<&[u64]>,
+    ) -> usize {
         let mut count = 0;
         self.changed.clear();
         for sprite in &mut self.sprites {
-            let blend = sprite.animation.blend(tick);
+            if let Some(active) = active {
+                let layer = sprite.animation.layer as usize;
+                let word = layer / u64::BITS as usize;
+                let bit = 1_u64 << (layer % u64::BITS as usize);
+                if active.get(word).is_none_or(|active| active & bit == 0) {
+                    continue;
+                }
+            }
+            let blend = sprite.animation.blend_with(tick, inputs);
             if sprite.shown == Some(blend) {
                 continue;
             }
@@ -363,11 +502,15 @@ impl SpriteAnimator {
     }
 }
 
-/// `animate.wgsl`'s pipeline, unless the device fails to make it: an OpenGL
-/// driver can list compute shaders among its extensions while wgpu writes
-/// the GLSL version of its core version, which has none (Mesa's
-/// `MESA_GL_VERSION_OVERRIDE`, older drivers).
-fn pipeline(device: &wgpu::Device) -> Option<wgpu::ComputePipeline> {
+/// `animate.wgsl`'s pipeline and the bind group layout of its group 0,
+/// unless the device fails to make the pipeline: an OpenGL driver can list
+/// compute shaders among its extensions while wgpu writes the GLSL version
+/// of its core version, which has none (Mesa's `MESA_GL_VERSION_OVERRIDE`,
+/// older drivers). A device lost between the scopes' pushes answers pipeline
+/// creation with a silent placeholder and reports its invalidity only when
+/// the layout is asked for — inside the scopes that error is caught, outside
+/// them it is uncaptured and panics (#3866).
+fn pipeline(device: &wgpu::Device) -> Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)> {
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -382,9 +525,10 @@ fn pipeline(device: &wgpu::Device) -> Option<wgpu::ComputePipeline> {
         compilation_options: Default::default(),
         cache: None,
     });
+    let layout = pipeline.get_bind_group_layout(0);
     let internal = pollster::block_on(internal.pop());
     match internal.or(pollster::block_on(validation.pop())) {
-        None => Some(pipeline),
+        None => Some((pipeline, layout)),
         Some(e) => {
             log::warn!("Horizon renderer: animated sprites drawn on the CPU ({e})");
             None
@@ -424,15 +568,63 @@ fn mix_level(frames: &[u8], [_, current, next, millis, edge]: [u32; 5], width: u
 /// array's size from its own size's chain, its first level repeated into the
 /// larger levels: that chain, which the shader repeats. Any other sprite: its
 /// chain at the array's size.
+#[cfg(test)]
 fn source_chain(pixels: &[u8], size: u32, settings: &[Settings], layer: u32) -> (Vec<u8>, u32) {
-    let native = settings.get(layer as usize).map_or(0, |s| s.native_size);
-    let edge = if native.is_power_of_two() && native < size {
-        native
+    let (mut chains, edge) = source_chains(&[pixels], size, settings, layer);
+    (chains.swap_remove(0), edge)
+}
+
+/// Every frame's chain, laid out as one frame's `source_chain`, but mipmapped as
+/// vanilla's `SpriteContents.increaseMipLevel` does: over the whole animation
+/// sheet (the frames stacked), so `solidify` and the alpha-to-coverage scale
+/// of each level are the sheet's, not each frame's. A frame alone has a
+/// single texel square at its 2x2 level, and its coverage scale could round
+/// a whole far frame transparent (kelp blinking out at distance).
+fn source_chains(
+    frames: &[&[u8]],
+    size: u32,
+    settings: &[Settings],
+    layer: u32,
+) -> (Vec<Vec<u8>>, u32) {
+    let s = settings.get(layer as usize).copied().unwrap_or_default();
+    let edge = if s.native_size.is_power_of_two() && s.native_size < size {
+        s.native_size
     } else {
         size
     };
-    let frame = crate::sprites::resample(pixels, size, edge);
-    (super::mip_chain(&frame, edge, settings, layer, 1).0, edge)
+    let mut sheet = crate::mipmap::Image {
+        width: edge,
+        height: edge * frames.len() as u32,
+        pixels: Vec::with_capacity((edge * edge) as usize * frames.len()),
+    };
+    for frame in frames {
+        let frame = crate::sprites::resample(frame, size, edge);
+        sheet.pixels.extend_from_slice(frame.as_chunks::<4>().0);
+    }
+    let has_transparent = s.has_transparent || sheet.pixels.iter().any(|p| p[3] == 0);
+    let levels = crate::mipmap::generate(
+        sheet,
+        edge.trailing_zeros(),
+        Settings {
+            has_transparent,
+            ..s
+        },
+    );
+    let chains = (0..frames.len())
+        .map(|frame| {
+            let mut chain = Vec::new();
+            for level in &levels {
+                let texels = (level.width * level.width) as usize;
+                chain.extend(
+                    level.pixels[frame * texels..(frame + 1) * texels]
+                        .iter()
+                        .flatten(),
+                );
+            }
+            chain
+        })
+        .collect();
+    (chains, edge)
 }
 
 #[cfg(test)]
@@ -573,6 +765,63 @@ mod tests {
     }
 
     #[test]
+    fn kelp_frames_share_the_sheet_mips() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root
+            .join("assets/minecraft/textures/block/kelp.png")
+            .exists()
+        {
+            return;
+        }
+        let mut sprites = crate::sprites::Sprites::default();
+        for name in ["kelp", "kelp_plant", "seagrass", "tall_seagrass_top"] {
+            sprites
+                .insert(&root, &format!("minecraft:block/{name}"))
+                .unwrap();
+        }
+        sprites.finish();
+        // A level drawn nowhere: no texel passes the cutout's alpha test.
+        let blank = |chain: &[u8], edge: u32| {
+            let mut start = 0;
+            let mut level = edge;
+            let mut blank = Vec::new();
+            while level > 0 {
+                let bytes = (level * level * 4) as usize;
+                let texels = &chain[start..start + bytes];
+                blank.push(texels.as_chunks::<4>().0.iter().all(|p| p[3] < 128));
+                start += bytes;
+                level >>= 1;
+            }
+            blank
+        };
+        let mut blinked = 0;
+        for animation in &sprites.animations {
+            let size = sprites.size;
+            let pixels: Vec<_> = (0..animation.frame_count())
+                .map(|f| animation.pixels(f))
+                .collect();
+            let (chains, edge) = source_chains(&pixels, size, &sprites.mips, animation.layer);
+            for (frame, chain) in chains.iter().enumerate() {
+                // The 1x1 level has no texel square to measure coverage on
+                // (vanilla leaves it unscaled); every larger level shows.
+                let levels = blank(chain, edge);
+                assert!(
+                    !levels[..levels.len() - 1].contains(&true),
+                    "layer {} frame {frame}: {levels:?}",
+                    animation.layer
+                );
+                let (alone, _) = source_chain(pixels[frame], size, &sprites.mips, animation.layer);
+                let alone = blank(&alone, edge);
+                blinked += usize::from(alone[..alone.len() - 1].contains(&true));
+            }
+        }
+        // Mipmapped frame by frame, some kelp frames vanished at the 2x2 level.
+        assert!(blinked > 0);
+    }
+
+    #[test]
     fn rounding_matches_f32_mix_but_for_exact_halves() {
         // The CPU blend this replaced: f32 mix, then rounded. They differ
         // only where the exact mix is a half, which f32 rounded either way.
@@ -592,7 +841,7 @@ mod tests {
     }
 
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = crate::gfx::test_gpu::instance();
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         pollster::block_on(adapter.request_device(&Default::default())).ok()
     }
@@ -717,7 +966,7 @@ mod tests {
         for tick in [0, 0, 1, 2, 3, 4, 7, 7, 12, 30] {
             let mut encoder = device.create_command_encoder(&Default::default());
             let shown: Vec<_> = animator.sprites.iter().map(|s| s.shown).collect();
-            animator.animate(&mut encoder, &mut uploads, tick);
+            animator.animate_with(&mut encoder, &mut uploads, tick, None, None, None);
             writes.push(
                 animator
                     .sprites
@@ -730,8 +979,11 @@ mod tests {
             queue.submit([encoder.finish()]);
             for animation in &animations {
                 let blend = animation.blend(tick);
-                let chain = |f| source_chain(animation.pixels(f), size, &mips, animation.layer);
-                let ((current, edge), (next, _)) = (chain(blend.frame), chain(blend.next));
+                let pixels: Vec<_> = (0..animation.frame_count())
+                    .map(|f| animation.pixels(f))
+                    .collect();
+                let (chains, edge) = source_chains(&pixels, size, &mips, animation.layer);
+                let (current, next) = (&chains[blend.frame], &chains[blend.next]);
                 let layers = read_back(
                     &device,
                     &queue,
@@ -739,7 +991,7 @@ mod tests {
                 );
                 assert_eq!(
                     layers[(animation.layer % split) as usize],
-                    reference(&current, &next, blend.millis, edge, size),
+                    reference(current, next, blend.millis, edge, size),
                     "layer {} at tick {tick}",
                     animation.layer
                 );
@@ -750,5 +1002,57 @@ mod tests {
         // but layer 1 at tick 30 (two 9-tick loops after 12), layer 3 when
         // its frame turns over (every 2 ticks, but 12 shows 7's frame).
         assert_eq!(writes, [3, 0, 2, 3, 2, 3, 3, 0, 2, 1]);
+    }
+
+    #[test]
+    fn inactive_sprites_are_skipped_by_collect() {
+        let Some((device, _)) = device() else {
+            return;
+        };
+        let size = 16;
+        let clips = [
+            (1, 16, r#"{"frametime":1}"#),
+            (3, 16, r#"{"frametime":1}"#),
+            (5, 16, r#"{"frametime":1}"#),
+        ];
+        let mut mips = vec![Settings::default(); 6];
+        let animations: Vec<_> = clips
+            .iter()
+            .map(|&(layer, native, metadata)| {
+                mips[layer as usize] = settings(native, Strategy::Cutout);
+                let frames = (0..3)
+                    .map(|f| crate::sprites::resample(&frame(native, layer * 7 + f), native, size))
+                    .collect();
+                crate::sprites::test_frames(layer, frames, metadata)
+            })
+            .collect();
+        // Construct with CPU writer (empty textures is fine for collect testing)
+        let mut animator = SpriteAnimator::new(&device, &animations, size, &mips, &[], 2, false);
+        assert!(animator.is_animated(1));
+        assert!(!animator.is_animated(2));
+        assert!(animator.is_animated(3));
+        assert!(animator.is_animated(5));
+
+        // When active layer is [1], only sprite 1 is collected
+        let active = [1_u64 << 1];
+        let count = animator.collect(1, None, Some(&active));
+        assert_eq!(count, 1);
+        assert_eq!(animator.changed, vec![1]);
+
+        // When active is empty, 0 are collected
+        let count = animator.collect(2, None, Some(&[0]));
+        assert_eq!(count, 0);
+        assert!(animator.changed.is_empty());
+
+        // When active is [3, 5], both 3 and 5 are collected
+        let active = [1_u64 << 3 | 1_u64 << 5];
+        let count = animator.collect(3, None, Some(&active));
+        assert_eq!(count, 2);
+        assert_eq!(animator.changed, vec![3, 5]);
+
+        // When active is None, all out-of-date sprites update
+        let count = animator.collect(5, None, None);
+        assert_eq!(count, 3);
+        assert_eq!(animator.changed, vec![1, 3, 5]);
     }
 }

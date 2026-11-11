@@ -34,8 +34,11 @@ pub struct Pack {
     pub description_style: Style,
     pub compatible: bool,
     pub compatibility: crate::pack_screen::Compat,
-    /// Overlay directories active for this game version, in `pack.mcmeta` order.
+    /// Overlay directories active for this game version, in `pack.mcmeta` order: also those a
+    /// Polytone `polytone_condition` turns on.
     pub overlays: Vec<String>,
+    /// The values of the pack's Polytone config entries.
+    pub polytone_configs: horizon_polytone::pack::Configs,
     /// `filter.block` entries (namespace and path patterns) hiding resources
     /// of the packs below this one.
     pub filter: Vec<Filter>,
@@ -156,54 +159,232 @@ fn format_of(v: &serde_json::Value) -> Option<(i64, i64)> {
         _ => None,
     }
 }
-/// PackCompatibility: inside [min_format, max_format] (or the legacy
-/// `pack_format`/`supported_formats`).
+/// `PackFormat`: major and minor.
+type Format = (i64, i64);
+/// `PackFormat.lastPreMinorVersion`: the last major without minor versions,
+/// for the resource pack format (64) or the data pack one (81).
+fn last_pre_minor(current: Format) -> i64 {
+    if current.0 == horizon_core::version::DATA_PACK_FORMAT.0 {
+        81
+    } else {
+        64
+    }
+}
+/// `PackFormat.fullCodec(default_minor)`: an int, or a list of 1 to 256
+/// non-negative ints whose second is the minor. None: it does not parse.
+fn format_codec(v: &serde_json::Value, default_minor: i64) -> Option<Format> {
+    // `Codec.INT` reads any JSON number through `Number.intValue`: a decimal such as `97.1`
+    // counts as its whole part (97), as it does for the game.
+    let non_negative = |v: &serde_json::Value| {
+        v.as_i64()
+            .or_else(|| {
+                v.as_f64()
+                    .filter(|f| f.is_finite())
+                    .map(|f| f.trunc() as i64)
+            })
+            .filter(|n| *n >= 0 && *n <= i64::from(i32::MAX))
+    };
+    match v {
+        serde_json::Value::Array(a) if (1..=256).contains(&a.len()) => {
+            let list: Option<Vec<i64>> = a.iter().map(non_negative).collect();
+            let list = list?;
+            Some((list[0], list.get(1).copied().unwrap_or(default_minor)))
+        }
+        serde_json::Value::Array(_) => None,
+        v => Some((non_negative(v)?, default_minor)),
+    }
+}
+/// `InclusiveRange.codec(Codec.INT)`: `[min, max]` or
+/// `{min_inclusive, max_inclusive}`, min not above max.
+fn int_range_codec(v: &serde_json::Value) -> Option<(i64, i64)> {
+    let int = |v: &serde_json::Value| v.as_i64().filter(|n| i32::try_from(*n).is_ok());
+    let (min, max) = match v {
+        serde_json::Value::Array(a) if a.len() == 2 => (int(&a[0])?, int(&a[1])?),
+        serde_json::Value::Object(o) => {
+            (int(o.get("min_inclusive")?)?, int(o.get("max_inclusive")?)?)
+        }
+        _ => return None,
+    };
+    (min <= max).then_some((min, max))
+}
+/// An `optionalFieldOf`: absent is `Ok(None)`, one that does not parse an error.
+fn optional<T>(
+    v: &serde_json::Value,
+    parse: impl Fn(&serde_json::Value) -> Option<T>,
+) -> Result<Option<T>, ()> {
+    if v.is_null() {
+        Ok(None)
+    } else {
+        parse(v).map(Some).ok_or(())
+    }
+}
+/// `PackFormat.IntermediaryFormat.validatePackFormatForRange`.
+fn validate_pack_format_for_range(main_format: i64, min: i64, max: i64) -> Option<String> {
+    if main_format < min || main_format > max {
+        Some(format!(
+            "Pack declared support for versions {min} to {max} but declared main format is {main_format}"
+        ))
+    } else if main_format < 15 {
+        Some("Multi-version packs cannot support minimum version of less than 15, since this will leave versions in range unable to load pack.".into())
+    } else {
+        None
+    }
+}
+/// `PackFormat` as `toString` prints it.
+fn format_text(f: Format) -> String {
+    if f.1 == i64::from(i32::MAX) {
+        format!("{}.*", f.0)
+    } else {
+        format!("{}.{}", f.0, f.1)
+    }
+}
+/// `PackFormat.IntermediaryFormat.validate` for a pack's `pack` section
+/// (`hasPackFormatField`, no `requireOldField`): the supported range, or why
+/// vanilla refuses the metadata (it then falls back to a pack of unknown
+/// format).
+pub fn validate_pack_range(
+    pack: &serde_json::Value,
+    last_pre_minor: i64,
+) -> Result<(Format, Format), String> {
+    const CONTEXT: &str = "Pack";
+    const OLD: &str = "supported_formats";
+    let bad = |field: &str| format!("{CONTEXT} field {field} does not parse");
+    let min =
+        optional(&pack["min_format"], |v| format_codec(v, 0)).map_err(|()| bad("min_format"))?;
+    let max = optional(&pack["max_format"], |v| {
+        format_codec(v, i64::from(i32::MAX))
+    })
+    .map_err(|()| bad("max_format"))?;
+    let format = optional(&pack["pack_format"], |v| {
+        v.as_i64().filter(|n| i32::try_from(*n).is_ok())
+    })
+    .map_err(|()| bad("pack_format"))?;
+    let supported = optional(&pack[OLD], int_range_codec).map_err(|()| bad(OLD))?;
+    if min.is_some() != max.is_some() {
+        return Err(format!(
+            "{CONTEXT} missing field, must declare both min_format and max_format"
+        ));
+    }
+    if let (Some(min), Some(max)) = (min, max) {
+        return validate_new_format(min, max, format, supported, last_pre_minor);
+    }
+    if let Some(supported) = supported {
+        return validate_old_format(supported, format, last_pre_minor);
+    }
+    match format {
+        Some(main) if main > last_pre_minor => Err(format!(
+            "{CONTEXT} declares support for version newer than {last_pre_minor}, but is missing mandatory fields min_format and max_format"
+        )),
+        Some(main) => Ok(((main, 0), (main, 0))),
+        None => Err(format!(
+            "{CONTEXT} could not be parsed, missing format version information"
+        )),
+    }
+}
+/// `PackFormat.IntermediaryFormat.validateNewFormat`.
+fn validate_new_format(
+    min: Format,
+    max: Format,
+    format: Option<i64>,
+    supported: Option<(i64, i64)>,
+    last_pre_minor: i64,
+) -> Result<(Format, Format), String> {
+    const OLD: &str = "supported_formats";
+    let (major_min, major_max) = (min.0, max.0);
+    if min > max {
+        return Err(format!(
+            "Pack min_format ({}) is greater than max_format ({})",
+            format_text(min),
+            format_text(max)
+        ));
+    }
+    if major_min > last_pre_minor {
+        if supported.is_some() {
+            return Err(format!(
+                "Pack key {OLD} is deprecated starting from pack format {}. Remove {OLD} from your pack.mcmeta.",
+                last_pre_minor + 1
+            ));
+        }
+        if let Some(main) = format
+            && let Some(error) = validate_pack_format_for_range(main, major_min, major_max)
+        {
+            return Err(error);
+        }
+    } else {
+        let Some(old) = supported else {
+            return Err(format!(
+                "Pack declares support for format {major_min}, but game versions supporting formats 15 to {last_pre_minor} require a {OLD} field. Add \"{OLD}\": [{major_min}, {last_pre_minor}] or require a version greater or equal to {}.0.",
+                last_pre_minor + 1
+            ));
+        };
+        if old.0 != major_min {
+            return Err(format!(
+                "Pack version declaration mismatch between {OLD} (from {}) and min_format ({})",
+                old.0,
+                format_text(min)
+            ));
+        }
+        if old.1 != major_max && old.1 != last_pre_minor {
+            return Err(format!(
+                "Pack version declaration mismatch between {OLD} (up to {}) and max_format ({})",
+                old.1,
+                format_text(max)
+            ));
+        }
+        let Some(main) = format else {
+            return Err(format!(
+                "Pack declares support for formats up to {last_pre_minor}, but game versions supporting formats 15 to {last_pre_minor} require a pack_format field. Add \"pack_format\": {major_min} or require a version greater or equal to {}.0.",
+                last_pre_minor + 1
+            ));
+        };
+        if let Some(error) = validate_pack_format_for_range(main, major_min, major_max) {
+            return Err(error);
+        }
+    }
+    Ok((min, max))
+}
+/// `PackFormat.IntermediaryFormat.validateOldFormat`.
+fn validate_old_format(
+    supported: (i64, i64),
+    format: Option<i64>,
+    last_pre_minor: i64,
+) -> Result<(Format, Format), String> {
+    let (min, max) = supported;
+    if max > last_pre_minor {
+        return Err(format!(
+            "Pack declares support for version newer than {last_pre_minor}, but is missing mandatory fields min_format and max_format"
+        ));
+    }
+    let Some(main) = format else {
+        return Err(format!(
+            "Pack declares support for formats up to {last_pre_minor}, but game versions supporting formats 15 to {last_pre_minor} require a pack_format field. Add \"pack_format\": {min} or require a version greater or equal to {}.0.",
+            last_pre_minor + 1
+        ));
+    };
+    if let Some(error) = validate_pack_format_for_range(main, min, max) {
+        return Err(error);
+    }
+    Ok(((min, 0), (max, 0)))
+}
+/// PackCompatibility: inside the pack's declared range.
 pub fn compatible(meta: &serde_json::Value) -> bool {
-    let pack = &meta["pack"];
-    let current = RESOURCE_FORMAT;
-    if let (Some(min), Some(max)) = (
-        format_of(&pack["min_format"]),
-        format_of(&pack["max_format"]),
-    ) {
-        return min <= current
-            && current <= (max.0, max.1.max(if max.1 == 0 { i64::MAX } else { max.1 }));
-    }
-    if let Some(range) = pack["supported_formats"].as_array()
-        && let (Some(lo), Some(hi)) = (
-            range.first().and_then(|v| v.as_i64()),
-            range.get(1).and_then(|v| v.as_i64()),
-        )
-    {
-        return lo <= current.0 && current.0 <= hi;
-    }
-    format_of(&pack["pack_format"]).is_some_and(|f| f.0 == current.0)
+    compatibility(meta) == crate::pack_screen::Compat::Compatible
 }
 /// `PackCompatibility.forVersion`: too old, too new, compatible, or unknown
-/// when the metadata names no format.
+/// when the metadata names no (valid) format.
 pub fn compatibility(meta: &serde_json::Value) -> crate::pack_screen::Compat {
+    compatibility_for(meta, RESOURCE_FORMAT)
+}
+/// `compatibility` against `current`, the resource or the data pack format.
+/// Metadata that fails `PackFormat.packCodec` parses as the fallback type,
+/// whose format is `Integer.MAX_VALUE`: unknown.
+pub fn compatibility_for(meta: &serde_json::Value, current: Format) -> crate::pack_screen::Compat {
     use crate::pack_screen::Compat;
-    let pack = &meta["pack"];
-    let current = RESOURCE_FORMAT;
-    let range = if let (Some(min), Some(max)) = (
-        format_of(&pack["min_format"]),
-        format_of(&pack["max_format"]),
-    ) {
-        Some((min, (max.0, if max.1 == 0 { i64::MAX } else { max.1 })))
-    } else if let Some(r) = pack["supported_formats"].as_array()
-        && let (Some(lo), Some(hi)) = (
-            r.first().and_then(|v| v.as_i64()),
-            r.get(1).and_then(|v| v.as_i64()),
-        )
-    {
-        Some(((lo, 0), (hi, i64::MAX)))
-    } else {
-        format_of(&pack["pack_format"]).map(|f| ((f.0, 0), (f.0, i64::MAX)))
-    };
-    match range {
-        None => Compat::Unknown,
-        Some((_, max)) if max < current => Compat::TooOld,
-        Some((min, _)) if current < min => Compat::TooNew,
-        _ => Compat::Compatible,
+    match validate_pack_range(&meta["pack"], last_pre_minor(current)) {
+        Err(_) => Compat::Unknown,
+        Ok((_, max)) if max < current => Compat::TooOld,
+        Ok((min, _)) if current < min => Compat::TooNew,
+        Ok(_) => Compat::Compatible,
     }
 }
 /// Whether an `overlays.entries[]` item applies to the current format
@@ -238,13 +419,20 @@ fn overlay_applies(entry: &serde_json::Value) -> bool {
         _ => false,
     }
 }
-fn overlays_of(meta: &serde_json::Value) -> Vec<String> {
+fn overlays_of(meta: &serde_json::Value, configs: &horizon_polytone::pack::Configs) -> Vec<String> {
     meta["overlays"]["entries"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|e| overlay_applies(e))
+        .filter(|e| horizon_polytone::pack::overlay_active(e, configs, overlay_applies(e)))
         .filter_map(|e| e["directory"].as_str().map(str::to_owned))
+        // OverlayMetadataSection's DIR_VALIDATOR: one folder of the pack, `[-_a-zA-Z0-9.]+`.
+        .filter(|d| {
+            stays_inside(d)
+                && !d.contains('/')
+                && d.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        })
         .collect()
 }
 fn filter_of(meta: &serde_json::Value) -> Vec<Filter> {
@@ -272,10 +460,161 @@ fn read_meta(source: &Source) -> Option<serde_json::Value> {
         Source::Dir(d) => fs::read(d.join("pack.mcmeta")).ok()?,
         Source::Zip(z) => Zip::open(z).ok()?.read("pack.mcmeta").ok()?,
     };
-    serde_json::from_slice(&bytes).ok()
+    parse_meta(&bytes)
+}
+/// The first JSON value of a `pack.mcmeta`: what follows it is ignored, as some packs sign the
+/// file with a comment after the closing brace. Gson reads past a UTF-8 byte order mark;
+/// serde_json rejects it.
+pub(crate) fn parse_meta(bytes: &[u8]) -> Option<serde_json::Value> {
+    first_json(bytes)
+}
+
+/// Reads the first JSON value from resource metadata, matching Gson's
+/// `JsonReader` (which ignores a trailing signature or comment). Resource
+/// packs commonly append such text to texture metadata as well as pack.mcmeta.
+pub(crate) fn first_json(bytes: &[u8]) -> Option<serde_json::Value> {
+    serde_json::Deserializer::from_slice(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes))
+        .into_iter()
+        .next()?
+        .ok()
+}
+/// A pack's Polytone config entries (`assets/<namespace>/polytone/config_entries/<name>.json`,
+/// in the pack's base, not its overlays) at their default values.
+pub fn polytone_configs(source: &Source) -> horizon_polytone::pack::Configs {
+    let mut configs = horizon_polytone::pack::Configs::default();
+    let id_of = |name: &str| -> Option<String> {
+        let rest = name.strip_prefix("assets/")?;
+        let (namespace, rest) = rest.split_once('/')?;
+        let entry = rest
+            .strip_prefix("polytone/config_entries/")?
+            .strip_suffix(".json")?;
+        Some(format!("{namespace}:{entry}"))
+    };
+    match source {
+        Source::Dir(d) => {
+            let Ok(namespaces) = fs::read_dir(d.join("assets")) else {
+                return configs;
+            };
+            for namespace in namespaces.flatten() {
+                let folder = namespace.path().join("polytone/config_entries");
+                for file in fs::read_dir(&folder).into_iter().flatten().flatten() {
+                    let name = format!(
+                        "assets/{}/polytone/config_entries/{}",
+                        namespace.file_name().to_string_lossy(),
+                        file.file_name().to_string_lossy()
+                    );
+                    if let (Some(id), Ok(bytes)) = (id_of(&name), fs::read(file.path()))
+                        && let Ok(json) = serde_json::from_slice(&bytes)
+                    {
+                        configs.add_entry(id, &json);
+                    }
+                }
+            }
+        }
+        Source::Zip(z) => {
+            let Ok(zip) = Zip::open(z) else {
+                return configs;
+            };
+            let names: Vec<String> = zip
+                .names()
+                .filter(|n| id_of(n).is_some())
+                .map(str::to_owned)
+                .collect();
+            for name in names {
+                if let (Some(id), Ok(bytes)) = (id_of(&name), zip.read(&name))
+                    && let Ok(json) = serde_json::from_slice(&bytes)
+                {
+                    configs.add_entry(id, &json);
+                }
+            }
+        }
+    }
+    for (id, value) in polytone_choices() {
+        if configs.entries().contains_key(&id) {
+            configs.set(&id, value);
+        }
+    }
+    configs
+}
+
+/// A pack's Polytone config entries and one's value, for the game's Pack Options.
+pub use horizon_polytone::pack::{ConfigValue, Configs};
+
+/// The player's Polytone config choices (#11486): what they changed from the packs' defaults,
+/// by entry id, for every pack. `polytone_configs` lays them over each pack's defaults.
+static POLYTONE_CHOICES: std::sync::RwLock<BTreeMap<String, horizon_polytone::pack::ConfigValue>> =
+    std::sync::RwLock::new(BTreeMap::new());
+
+pub fn polytone_choices() -> BTreeMap<String, horizon_polytone::pack::ConfigValue> {
+    POLYTONE_CHOICES
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_default()
+}
+
+/// Replaces the player's Polytone config choices (packs read them when they load again).
+pub fn set_polytone_choices(choices: BTreeMap<String, horizon_polytone::pack::ConfigValue>) {
+    if let Ok(mut c) = POLYTONE_CHOICES.write() {
+        *c = choices;
+    }
+}
+
+/// Where the choices are kept: `polytone-configs.json` beside `options.txt`.
+pub fn polytone_choices_file() -> std::path::PathBuf {
+    crate::logging::player_dir().join("polytone-configs.json")
+}
+
+/// Reads the choices from `path` (none when it is missing or broken).
+pub fn load_polytone_choices(path: &Path) -> BTreeMap<String, horizon_polytone::pack::ConfigValue> {
+    use horizon_polytone::pack::ConfigValue;
+    let Ok(bytes) = fs::read(path) else {
+        return BTreeMap::new();
+    };
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_slice(&bytes) else {
+        log::warn!("{}: not a JSON object", path.display());
+        return BTreeMap::new();
+    };
+    map.into_iter()
+        .filter_map(|(id, v)| {
+            let value = match v {
+                serde_json::Value::Number(n) => ConfigValue::Number(n.as_f64()?),
+                serde_json::Value::String(s) => ConfigValue::Text(s),
+                serde_json::Value::Bool(b) => ConfigValue::Bool(b),
+                _ => return None,
+            };
+            Some((id, value))
+        })
+        .collect()
+}
+
+/// Writes the choices to `path`.
+pub fn save_polytone_choices(
+    path: &Path,
+    choices: &BTreeMap<String, horizon_polytone::pack::ConfigValue>,
+) -> std::io::Result<()> {
+    use horizon_polytone::pack::ConfigValue;
+    let map: serde_json::Map<String, serde_json::Value> = choices
+        .iter()
+        .map(|(id, v)| {
+            let json = match v {
+                ConfigValue::Number(n) => serde_json::json!(n),
+                ConfigValue::Text(s) => serde_json::json!(s),
+                ConfigValue::Bool(b) => serde_json::json!(b),
+            };
+            (id.clone(), json)
+        })
+        .collect();
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(map))
+        .map_err(std::io::Error::other)?;
+    fs::write(path, text)
 }
 fn pack(id: String, title: Text, source: Source) -> Option<Pack> {
+    pack_for(id, title, source, RESOURCE_FORMAT)
+}
+/// A pack whose compatibility is against `format`.
+fn pack_for(id: String, title: Text, source: Source, format: (i64, i64)) -> Option<Pack> {
     let meta = read_meta(&source)?;
+    let polytone_configs = polytone_configs(&source);
     let (raw_description, description_style) = component_root(&meta["pack"]["description"]);
     Some(Pack {
         id,
@@ -284,8 +623,9 @@ fn pack(id: String, title: Text, source: Source) -> Option<Pack> {
         raw_description,
         description_style,
         compatible: compatible(&meta),
-        compatibility: compatibility(&meta),
-        overlays: overlays_of(&meta),
+        compatibility: compatibility_for(&meta, format),
+        overlays: overlays_of(&meta, &polytone_configs),
+        polytone_configs,
         filter: filter_of(&meta),
         source,
     })
@@ -305,7 +645,13 @@ pub fn discover(resources: &Path, packs_dir: &Path) -> Vec<Pack> {
             out.push(p);
         }
     }
-    let mut user: Vec<Pack> = fs::read_dir(packs_dir)
+    out.extend(folder(packs_dir, RESOURCE_FORMAT));
+    out
+}
+/// The packs (folders and zips) in `dir`, by name, as `FolderRepositorySource`
+/// finds them; their compatibility is against `format`.
+pub fn folder(dir: &Path, format: (i64, i64)) -> Vec<Pack> {
+    let mut user: Vec<Pack> = fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -319,12 +665,11 @@ pub fn discover(resources: &Path, packs_dir: &Path) -> Vec<Pack> {
             } else {
                 return None;
             };
-            pack(format!("file/{name}"), Text::literal(name), source)
+            pack_for(format!("file/{name}"), Text::literal(name), source, format)
         })
         .collect();
     user.sort_by(|a, b| a.id.cmp(&b.id));
-    out.extend(user);
-    out
+    user
 }
 /// A file a pack provides: its path (folder packs) and its name inside the pack.
 type Provided = (Option<PathBuf>, String);
@@ -360,7 +705,7 @@ fn pack_files(pack: &Pack) -> io::Result<BTreeMap<String, Provided>> {
             let zip = Zip::open(z)?;
             for root in &roots {
                 let prefix = format!("{root}assets/");
-                for name in zip.names() {
+                for name in zip.names().filter(|name| stays_inside(name)) {
                     if let Some(rest) = name.strip_prefix(&prefix) {
                         out.insert(format!("assets/{rest}"), (None, name.to_owned()));
                     }
@@ -369,6 +714,15 @@ fn pack_files(pack: &Pack) -> io::Result<BTreeMap<String, Provided>> {
         }
     }
     Ok(out)
+}
+/// Whether a zip entry's name, joined to the overlay folder, stays in it: `/`-separated parts
+/// (zip.rs turns `\` into `/`), none empty, `.` or `..`, and no `:` (a drive or a stream on
+/// Windows). A pack, a server's too, may name entries anything.
+fn stays_inside(name: &str) -> bool {
+    !name.contains([':', '\0'])
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 #[cfg(unix)]
 fn link(target: &Path, at: &Path) -> io::Result<()> {
@@ -380,11 +734,25 @@ fn link(target: &Path, at: &Path) -> io::Result<()> {
     if target.is_dir() {
         Ok(())
     } else {
-        fs::copy(target, at).map(|_| ())
+        // The mirror only reads these files, and unix links them: a hardlink gives
+        // the same view without writing the 639 MB prepared root again, which was
+        // 33 s of a cold Windows launch with a pack on. Another volume (or a
+        // filesystem without hardlinks) still copies.
+        fs::hard_link(target, at).or_else(|_| fs::copy(target, at).map(|_| ()))
     }
 }
+/// A directory junction (`horizon_threads::junction`); the mirror falls back to copying the
+/// tree when it fails.
+#[cfg(windows)]
+fn junction(target: &Path, at: &Path) -> io::Result<()> {
+    horizon_threads::junction(target, at)
+}
+#[cfg(not(windows))]
+fn junction(_: &Path, _: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
 /// Build `out` as `vanilla` with the packs' files layered on top (packs in
-/// load order, last wins). Untouched directories are symlinks into vanilla.
+/// load order, last wins). Untouched directories are links into vanilla.
 pub fn build_overlay(vanilla: &Path, packs: &[Pack], out: &Path) -> io::Result<()> {
     cache::build(vanilla, packs, out)
 }
@@ -416,6 +784,41 @@ fn build_overlay_uncached(
             }
             files.insert(name, (i, provided));
         }
+    }
+    // FallbackResourceManager: a file's `.mcmeta` counts only from the pack that
+    // supplies the file or one above it; vanilla's own sits below every pack.
+    let mut hidden: BTreeSet<String> = files
+        .iter()
+        .filter(|(name, _)| !name.ends_with(".mcmeta"))
+        .filter_map(|(name, (owner, _))| {
+            let meta = format!("{name}.mcmeta");
+            match files.get(&meta) {
+                Some((meta_owner, _)) if meta_owner >= owner => None,
+                _ => Some(meta),
+            }
+        })
+        .collect();
+    // A companion from below the winning colour would describe another surface.
+    // A map-only pack above it is intentional and remains valid.
+    for (name, (owner, _)) in &files {
+        let Some(stem) = name.strip_suffix(".png") else {
+            continue;
+        };
+        if stem.ends_with("_n") || stem.ends_with("_s") {
+            continue;
+        }
+        for suffix in ["_n.png", "_s.png"] {
+            let map = format!("{stem}{suffix}");
+            if files
+                .get(&map)
+                .is_none_or(|(map_owner, _)| map_owner < owner)
+            {
+                hidden.insert(map);
+            }
+        }
+    }
+    for name in &hidden {
+        files.remove(name);
     }
     // Vanilla sits below every pack, so filters hide its files too.
     let filters: Vec<&Filter> = packs.iter().flat_map(|p| &p.filter).collect();
@@ -454,6 +857,18 @@ fn build_overlay_uncached(
                     .and_then(Option::as_ref)
                     .and_then(|z| z.read(inner).ok()),
             };
+            // Polytone: a pack's sound entries whose `polytone_condition` doesn't hold.
+            let bytes = match (bytes, merge_kind(name)) {
+                (Some(b), Some(Merge::Sounds)) => Some(
+                    packs
+                        .get(*owner)
+                        .and_then(|p| {
+                            horizon_polytone::pack::sounds_without_unmet(&b, &p.polytone_configs)
+                        })
+                        .unwrap_or(b),
+                ),
+                (b, _) => b,
+            };
             layers.extend(bytes);
         }
         if let Some(kind) = merge_kind(name)
@@ -462,17 +877,20 @@ fn build_overlay_uncached(
             merged.insert(name.clone(), bytes);
         }
     }
+    /// A zip entry to write: its pack, its name in the zip and where it goes.
+    type Extract<'a> = (usize, &'a str, PathBuf);
     #[allow(clippy::too_many_arguments)]
-    fn mirror(
+    fn mirror<'a>(
         rel: &str,
         vanilla: &Path,
         out: &Path,
         touched: &BTreeSet<String>,
-        files: &BTreeMap<String, (usize, Provided)>,
+        hidden: &BTreeSet<String>,
+        files: &'a BTreeMap<String, (usize, Provided)>,
         merged: &BTreeMap<String, Vec<u8>>,
         filters: &[&Filter],
-        zips: &[Option<Zip>],
         dependencies: &mut cache::Dependencies,
+        extract: &mut Vec<Extract<'a>>,
     ) -> io::Result<()> {
         let src = if rel.is_empty() {
             vanilla.to_path_buf()
@@ -499,28 +917,41 @@ fn build_overlay_uncached(
         } else {
             format!("{rel}/")
         };
-        for f in files.keys().filter_map(|f| f.strip_prefix(&prefix)) {
+        // The files under this directory are one run of the sorted map: walking only that run
+        // keeps a pack of tens of thousands of files in thousands of folders from being
+        // scanned once per folder.
+        for f in files
+            .range(prefix.clone()..)
+            .map_while(|(f, _)| f.strip_prefix(&prefix))
+        {
             names.insert(f.split('/').next().unwrap_or("").to_owned());
         }
         for name in names {
             let child = format!("{prefix}{name}");
+            // Vanilla's files in one file: it describes vanilla's root, not this mirror.
+            if hidden.contains(&child) || child == horizon_core::prepared_files::FILE_NAME {
+                continue;
+            }
             if let Some(bytes) = merged.get(&child) {
                 fs::write(out.join(&child), bytes)?;
             } else if let Some((owner, (path, inner))) = files.get(&child) {
                 let target = out.join(&child);
                 match path {
                     Some(p) => link(p, &target)?,
-                    None => {
-                        if let Some(Some(z)) = zips.get(*owner) {
-                            fs::write(&target, z.read(inner)?)?;
-                        }
-                    }
+                    // Inflated and written after the walk, on every thread.
+                    None => extract.push((*owner, inner.as_str(), target)),
                 }
+            } else if filters.is_empty()
+                && !touched.contains(&child)
+                && vanilla.join(&child).is_dir()
+                && junction(&vanilla.join(&child), &out.join(&child)).is_ok()
+            {
+                // Linked whole, like the unix symlink: no file in it is visited or copied.
             } else if touched.contains(&child)
-                // Windows cannot link a directory the way unix does (`link` above), so an
-                // untouched one has to be mirrored: skipping it hid textures/font and the
-                // title panorama from the overlay, and a font json that names those sheets
-                // then failed to load (#1688).
+                // Without a junction Windows cannot link a directory the way unix does (`link`
+                // above), so an untouched one has to be mirrored: skipping it hid textures/font
+                // and the title panorama from the overlay, and a font json that names those
+                // sheets then failed to load (#1688).
                 || (vanilla.join(&child).is_dir() && (cfg!(not(unix)) || !filters.is_empty()))
             {
                 mirror(
@@ -528,11 +959,12 @@ fn build_overlay_uncached(
                     vanilla,
                     out,
                     touched,
+                    hidden,
                     files,
                     merged,
                     filters,
-                    zips,
                     dependencies,
+                    extract,
                 )?;
             } else if filters.iter().any(|f| f.blocks(&child)) {
                 // Hidden by a pack's filter.
@@ -546,17 +978,68 @@ fn build_overlay_uncached(
         }
         Ok(())
     }
+    let mut extract = Vec::new();
     mirror(
         "",
         vanilla,
         out,
         &touched_dirs,
+        &hidden,
         &files,
         &merged,
         &filters,
-        &zips,
         dependencies,
-    )
+        &mut extract,
+    )?;
+    // What the zips may unpack to, all threads together: a server's pack is a download the
+    // player only accepts, and a gigabyte of zeros deflates to a megabyte, so without it a pack
+    // at the download limit wrote hundreds of gigabytes here. Vanilla never unpacks a pack.
+    let budget = std::sync::atomic::AtomicU64::new(unpack_budget(packs));
+    // Inflating and writing a big pack's files one by one was most of a cold build; its
+    // folders all exist by now.
+    let extracted: io::Result<()> = crate::par::par_map(&extract, |(owner, inner, target)| {
+        let Some(Some(z)) = zips.get(*owner) else {
+            return Ok(());
+        };
+        let copied = fs::File::create(target).and_then(|file| {
+            let mut file = io::BufWriter::new(file);
+            z.copy_to(inner, &mut file, &budget)?;
+            io::Write::flush(&mut file)
+        });
+        match copied {
+            Ok(()) => Ok(()),
+            // Past the budget the build fails, and the reload drops the server packs.
+            Err(e) if e.kind() == io::ErrorKind::FileTooLarge => Err(e),
+            // One unreadable entry costs that file, not the pack: an error here
+            // failed the build and the reload dropped every server pack in the stack.
+            Err(e) => {
+                log::warn!("Horizon: skipping unreadable pack entry {inner}: {e}");
+                let _ = fs::remove_file(target);
+                Ok(())
+            }
+        }
+    })
+    .into_iter()
+    .collect();
+    if extracted.is_err() {
+        // What was unpacked before the budget ran out goes too, not only the marker.
+        let _ = fs::remove_dir_all(out);
+    }
+    extracted
+}
+/// The most the zip packs in `packs` may unpack to in one overlay: 16 times their size on disk
+/// (real packs are mostly PNGs and JSON, a few times smaller zipped at most), at least 64 MiB
+/// for a small pack of text, and never past 8 GiB.
+fn unpack_budget(packs: &[Pack]) -> u64 {
+    packs
+        .iter()
+        .filter_map(|p| match &p.source {
+            Source::Zip(z) => fs::metadata(z).ok().map(|m| m.len()),
+            Source::Dir(_) => None,
+        })
+        .sum::<u64>()
+        .saturating_mul(16)
+        .clamp(64 << 20, 8 << 30)
 }
 /// Files vanilla loads from every pack in turn (`getResourceStack`) rather
 /// than from the top pack only.
@@ -571,7 +1054,14 @@ enum Merge {
     Font,
     /// `SpriteSourceList.load`: sources from the bottom pack up.
     Atlas,
+    /// `BlockStateModelLoader.loadBlockStateDefinitionStack`: every pack's
+    /// definition binds on its own, and a higher one replaces only the states
+    /// it binds. Kept as its layers ([`BLOCKSTATE_LAYERS`]) for the catalog.
+    BlockStates,
 }
+/// The key of a stacked blockstate file: its definitions, bottom first, each
+/// as the pack wrote it.
+pub const BLOCKSTATE_LAYERS: &str = "horizon:layers";
 fn merge_kind(name: &str) -> Option<Merge> {
     let (_, rest) = name.strip_prefix("assets/")?.split_once('/')?;
     if rest == "sounds.json" {
@@ -582,6 +1072,7 @@ fn merge_kind(name: &str) -> Option<Merge> {
         "lang" => Some(Merge::Lang),
         "font" => Some(Merge::Font),
         "atlases" => Some(Merge::Atlas),
+        "blockstates" => Some(Merge::BlockStates),
         _ => None,
     }
 }
@@ -589,13 +1080,28 @@ fn merge_kind(name: &str) -> Option<Merge> {
 /// does. Layers that do not parse are skipped, as vanilla logs and skips them.
 fn merge(kind: Merge, layers: &[Vec<u8>]) -> Option<Vec<u8>> {
     use serde_json::{Map, Value};
-    let parsed: Vec<Map<String, Value>> = layers
+    let mut parsed: Vec<Map<String, Value>> = layers
         .iter()
         // SoundManager skips a sounds.json Gson rejects, whole.
         .filter(|b| kind != Merge::Sounds || crate::sound_events::is_valid_file(b))
-        .filter_map(|b| match serde_json::from_slice(b) {
-            Ok(Value::Object(m)) => Some(m),
-            _ => None,
+        .filter_map(|b| {
+            match serde_json::from_slice(b) {
+                Ok(Value::Object(m)) => Some(m),
+                // `Language.loadFromJson` reads with Gson's lenient reader, so
+                // a lang file with `#` comments still counts; a file that
+                // strict JSON accepts keeps its bytes as they are.
+                _ if kind == Merge::Lang => {
+                    let mut strings = std::collections::HashMap::new();
+                    horizon_client_core::lang::read_lang_file(b, &mut strings);
+                    Some(
+                        strings
+                            .into_iter()
+                            .map(|(k, v)| (k, Value::String(v)))
+                            .collect(),
+                    )
+                }
+                _ => None,
+            }
         })
         .collect();
     let list = |key: &str, layers: &mut dyn Iterator<Item = &Map<String, Value>>| {
@@ -632,6 +1138,12 @@ fn merge(kind: Merge, layers: &[Vec<u8>]) -> Option<Vec<u8>> {
         }
         Merge::Font => list("providers", &mut parsed.iter().rev()),
         Merge::Atlas => list("sources", &mut parsed.iter()),
+        // One definition is the file as it is.
+        Merge::BlockStates if parsed.len() < 2 => Value::Object(parsed.pop()?),
+        Merge::BlockStates => Value::Object(Map::from_iter([(
+            BLOCKSTATE_LAYERS.to_owned(),
+            Value::Array(parsed.into_iter().map(Value::Object).collect()),
+        )])),
     };
     serde_json::to_vec(&out).ok()
 }
@@ -653,6 +1165,12 @@ pub fn enabled(all: &[Pack], ids: &[String]) -> Vec<Pack> {
         .filter_map(|id| all.iter().find(|p| &p.id == id).cloned())
         .collect()
 }
+/// `PackRepository.isAbleToClearAnyPack`: clearing the selection
+/// (`rebuildSelected([])`, which keeps only the required vanilla pack)
+/// changes it, that is, some selected pack still exists.
+pub fn able_to_clear_any_pack(all: &[Pack], selected: &[String]) -> bool {
+    !enabled(all, selected).is_empty()
+}
 /// Resource root for a pack selection: vanilla itself when no pack is on.
 pub fn resource_root(vanilla: &Path, packs: &[Pack], cache: &Path) -> io::Result<PathBuf> {
     if packs.is_empty() {
@@ -667,7 +1185,10 @@ pub fn resource_root(vanilla: &Path, packs: &[Pack], cache: &Path) -> io::Result
         (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
     });
     let out = cache.join(format!("{hash:016x}"));
+    cache::hold(&out)?;
     build_overlay(vanilla, packs, &out)?;
+    // Old selections' overlays would otherwise stay for good, each a whole unpacked copy.
+    cache::prune(cache);
     Ok(out)
 }
 
@@ -709,6 +1230,30 @@ impl Selectable {
             compatible: true,
         }
     }
+    /// A server's downloaded pack (`DownloadedPackSource.DOWNLOADED_PACK_SELECTION`):
+    /// required, fixed at the top, so the pack screen cannot remove or reorder it.
+    pub fn downloaded(id: &str, compatible: bool) -> Self {
+        Self {
+            id: id.to_owned(),
+            required: true,
+            position: Position::Top,
+            fixed: true,
+            compatible,
+        }
+    }
+}
+
+/// Ids from `DownloadedPackSource` (`server/…`); they must not go into
+/// `options.txt` `resourcePacks`.
+pub fn is_downloaded_pack_id(id: &str) -> bool {
+    id.starts_with("server/")
+}
+
+/// The player's own selection: drop every downloaded server/world pack id.
+pub fn player_pack_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
+    ids.into_iter()
+        .filter(|id| !is_downloaded_pack_id(id))
+        .collect()
 }
 
 /// `Pack.Position.insert`: below or above the packs fixed at that end.
@@ -741,7 +1286,9 @@ impl SelectionModel {
     /// `available` in any order; `selected` as options.txt lists them,
     /// bottom first.
     pub fn new(mut available: Vec<Selectable>, selected: &[String]) -> Self {
-        // PackRepository.available is a TreeMap by id (String.compareTo).
+        // PackRepository.discoverAvailable: every source's packs go into one
+        // TreeMap by id (String.compareTo), so `file/` packs sort among the
+        // built-in ones.
         available.sort_by(|a, b| a.id.encode_utf16().cmp(b.id.encode_utf16()));
         available.dedup_by(|a, b| a.id == b.id);
         let mut m = Self {
@@ -840,16 +1387,212 @@ impl SelectionModel {
         ok
     }
     /// `commit`: the repository's selection, bottom first, as options.txt
-    /// stores it.
+    /// stores it (downloaded `server/…` packs stay out of that file).
     pub fn commit(&self) -> Vec<String> {
         let ids: Vec<String> = self.selected.iter().rev().map(|p| p.id.clone()).collect();
-        self.rebuild(&ids).into_iter().map(|p| p.id).collect()
+        player_pack_ids(self.rebuild(&ids).into_iter().map(|p| p.id))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `DownloadedPackSource.DOWNLOADED_PACK_SELECTION`: the pack is selected,
+    /// fixed at the top, cannot be removed, and stays out of options.txt.
+    #[test]
+    fn a_downloaded_server_pack_is_fixed_selected_and_not_committed() {
+        let server = "server/00000000000000000000000000000001/hash.zip";
+        let available = vec![
+            Selectable::optional("file/Mine", true),
+            Selectable::downloaded(server, true),
+            Selectable::vanilla(),
+        ];
+        let model = SelectionModel::new(available, &["file/Mine".into()]);
+        assert_eq!(
+            model
+                .selected
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            [server, "file/Mine", "vanilla"]
+        );
+        assert!(!model.can_unselect(true, 0));
+        // A neighbour cannot move up past the fixed server pack.
+        assert!(!model.can_move_up(true, 1));
+        assert_eq!(
+            model.commit(),
+            vec!["vanilla".to_owned(), "file/Mine".to_owned()]
+        );
+        assert!(is_downloaded_pack_id(server));
+        assert!(!is_downloaded_pack_id("file/Mine"));
+    }
+
+    #[test]
+    fn a_comment_after_the_metadata_does_not_hide_a_pack() {
+        let meta = br#"{"pack":{"description":"d","pack_format":97}}
+// Signed by the pack's author"#;
+        assert!(parse_meta(meta).is_some());
+        assert!(parse_meta(b"not json").is_none());
+    }
+
+    #[test]
+    fn mcmeta_with_utf8_bom_is_read() {
+        let dir = std::env::temp_dir().join(format!("horizon-bom-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut meta = b"\xEF\xBB\xBF".to_vec();
+        meta.extend_from_slice(br#"{"pack":{"description":"d","pack_format":97}}"#);
+        fs::write(dir.join("pack.mcmeta"), &meta).unwrap();
+        assert!(read_meta(&Source::Dir(dir.clone())).is_some());
+        // Without a BOM the same JSON still reads; other leading bytes still fail.
+        fs::write(dir.join("pack.mcmeta"), &meta[3..]).unwrap();
+        assert!(read_meta(&Source::Dir(dir.clone())).is_some());
+        fs::write(
+            dir.join("pack.mcmeta"),
+            [b"\xEF\xBB".as_slice(), &meta[3..]].concat(),
+        )
+        .unwrap();
+        assert!(read_meta(&Source::Dir(dir.clone())).is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+    /// `PackFormat.IntermediaryFormat.validate` and its three helpers, with
+    /// the resource pack's last pre-minor version, 64.
+    #[test]
+    fn pack_format_validation() {
+        let v = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        let check = |s: &str| validate_pack_range(&v(s), 64);
+        // validate: both min_format and max_format, or neither.
+        assert!(
+            check(r#"{"min_format":97}"#)
+                .unwrap_err()
+                .contains("both min_format and max_format")
+        );
+        assert!(check(r#"{"max_format":97}"#).is_err());
+        assert!(check("{}").unwrap_err().contains("missing format version"));
+        // A pack_format alone: fine up to 64, not above.
+        assert_eq!(check(r#"{"pack_format":34}"#), Ok(((34, 0), (34, 0))));
+        assert!(
+            check(r#"{"pack_format":97}"#)
+                .unwrap_err()
+                .contains("newer than 64")
+        );
+        // validateNewFormat: min above max, the deprecated key above 64.
+        assert!(
+            check(r#"{"min_format":98,"max_format":97}"#)
+                .unwrap_err()
+                .contains("greater than max_format")
+        );
+        assert!(check(r#"{"min_format":[97,2],"max_format":[97,1]}"#).is_err());
+        assert!(
+            check(r#"{"min_format":97,"max_format":98,"supported_formats":[97,98]}"#)
+                .unwrap_err()
+                .contains("deprecated")
+        );
+        // A decimal reads as its whole part, in a list or alone: `[97.1]` is format 97 (a pack
+        // that meant `[97, 1]` still loads and counts as compatible).
+        assert_eq!(
+            check(r#"{"min_format":[97.1],"max_format":[97.1]}"#),
+            Ok(((97, 0), (97, i64::from(i32::MAX))))
+        );
+        assert_eq!(
+            check(r#"{"min_format":97.9,"max_format":98.5}"#),
+            Ok(((97, 0), (98, i64::from(i32::MAX))))
+        );
+        assert_eq!(
+            check(r#"{"min_format":97,"max_format":98}"#),
+            Ok(((97, 0), (98, i64::from(i32::MAX))))
+        );
+        assert_eq!(
+            check(r#"{"min_format":[97,0],"max_format":[97,1]}"#),
+            Ok(((97, 0), (97, 1)))
+        );
+        // validatePackFormatForRange: a pack_format outside the range.
+        assert!(
+            check(r#"{"min_format":97,"max_format":98,"pack_format":99}"#)
+                .unwrap_err()
+                .contains("declared main format is 99")
+        );
+        assert!(check(r#"{"min_format":97,"max_format":98,"pack_format":98}"#).is_ok());
+        // Below 65 the old fields are required and must agree.
+        assert!(
+            check(r#"{"min_format":34,"max_format":70}"#)
+                .unwrap_err()
+                .contains("require a supported_formats")
+        );
+        assert!(
+            check(
+                r#"{"min_format":34,"max_format":70,"supported_formats":[35,64],"pack_format":35}"#
+            )
+            .unwrap_err()
+            .contains("mismatch")
+        );
+        assert!(
+            check(
+                r#"{"min_format":34,"max_format":70,"supported_formats":[34,60],"pack_format":35}"#
+            )
+            .unwrap_err()
+            .contains("mismatch")
+        );
+        assert!(
+            check(r#"{"min_format":34,"max_format":70,"supported_formats":[34,64]}"#)
+                .unwrap_err()
+                .contains("require a pack_format")
+        );
+        assert!(
+            check(
+                r#"{"min_format":34,"max_format":70,"supported_formats":[34,64],"pack_format":33}"#
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                r#"{"min_format":34,"max_format":70,"supported_formats":[34,64],"pack_format":34}"#
+            )
+            .is_ok()
+        );
+        // Multi-version packs below 15 cannot work.
+        assert!(
+            check(
+                r#"{"min_format":10,"max_format":70,"supported_formats":[10,64],"pack_format":10}"#
+            )
+            .unwrap_err()
+            .contains("less than 15")
+        );
+        // validateOldFormat: a range above 64, or no pack_format.
+        assert!(
+            check(r#"{"supported_formats":[34,70],"pack_format":34}"#)
+                .unwrap_err()
+                .contains("newer than 64")
+        );
+        assert!(
+            check(r#"{"supported_formats":[34,60]}"#)
+                .unwrap_err()
+                .contains("require a pack_format")
+        );
+        assert_eq!(
+            check(r#"{"supported_formats":[34,60],"pack_format":40}"#),
+            Ok(((34, 0), (60, 0)))
+        );
+        assert!(
+            check(
+                r#"{"supported_formats":{"min_inclusive":34,"max_inclusive":60},"pack_format":40}"#
+            )
+            .is_ok()
+        );
+        assert!(check(r#"{"supported_formats":[60,34],"pack_format":40}"#).is_err());
+        // A refused pack is of unknown format.
+        use crate::pack_screen::Compat;
+        assert_eq!(
+            compatibility(&v(r#"{"pack":{"pack_format":97}}"#)),
+            Compat::Unknown
+        );
+        assert_eq!(
+            compatibility(&v(
+                r#"{"pack":{"min_format":97,"max_format":98,"pack_format":99}}"#
+            )),
+            Compat::Unknown
+        );
+    }
     #[test]
     fn compatibility_ranges() {
         let v = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
@@ -862,12 +1605,54 @@ mod tests {
         assert!(!compatible(&v(
             r#"{"pack":{"min_format":[97,2],"max_format":99}}"#
         )));
-        assert!(compatible(&v(r#"{"pack":{"pack_format":97}}"#)));
         assert!(!compatible(&v(r#"{"pack":{"pack_format":34}}"#)));
         assert_eq!(
             component(&v(r#"["a",{"text":"b","color":"red"}]"#)).plain(),
             "ab"
         );
+    }
+    #[test]
+    fn a_sound_entry_whose_polytone_condition_fails_is_left_out() {
+        let base =
+            std::env::temp_dir().join(format!("horizon-packs-sound-cond-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (vanilla, dir, out) = (base.join("vanilla"), base.join("pack"), base.join("out"));
+        fs::create_dir_all(vanilla.join("assets/minecraft")).unwrap();
+        fs::write(
+            vanilla.join("assets/minecraft/sounds.json"),
+            r#"{"block.anvil.land":{"sounds":["vanilla"]}}"#,
+        )
+        .unwrap();
+        let configs = dir.join("assets/mypack/polytone/config_entries");
+        fs::create_dir_all(&configs).unwrap();
+        fs::create_dir_all(dir.join("assets/minecraft")).unwrap();
+        fs::write(configs.join("quiet.json"), r#"{"default_value": "OFF"}"#).unwrap();
+        fs::write(
+            dir.join("pack.mcmeta"),
+            r#"{"pack":{"description":"p","pack_format":97}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("assets/minecraft/sounds.json"),
+            r#"{"block.anvil.land":{"replace":true,"polytone_condition":"config('mypack:quiet') == 'ON'","sounds":["soft"]},
+                "block.anvil.use":{"sounds":["kept"]}}"#,
+        )
+        .unwrap();
+        let pack = pack("file/p".into(), Text::literal("p"), Source::Dir(dir)).unwrap();
+        build_overlay(&vanilla, &[pack], &out).unwrap();
+        let merged: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("assets/minecraft/sounds.json")).unwrap())
+                .unwrap();
+        // The condition is false: the pack's entry doesn't replace vanilla's.
+        assert_eq!(
+            merged["block.anvil.land"]["sounds"],
+            serde_json::json!(["vanilla"])
+        );
+        assert_eq!(
+            merged["block.anvil.use"]["sounds"],
+            serde_json::json!(["kept"])
+        );
+        let _ = fs::remove_dir_all(base);
     }
     #[test]
     fn stacked_resources_merge_like_vanilla() {
@@ -884,6 +1669,18 @@ mod tests {
         assert_eq!(
             parse(lang.unwrap()),
             serde_json::json!({"a":"vanilla a","b":"pack b"})
+        );
+        // A layer with `#` comments is read leniently, not dropped.
+        let lenient = merge(
+            Merge::Lang,
+            &[
+                json(r#"{"a":"vanilla a"}"#),
+                json("# a pack comment\n{\"b\":\"pack b\", # trailing\n\"a\":\"pack a\"}"),
+            ],
+        );
+        assert_eq!(
+            parse(lenient.unwrap()),
+            serde_json::json!({"a":"pack a","b":"pack b"})
         );
         // SoundManager: sounds add up; `replace` starts the event over.
         let sounds = merge(
@@ -918,6 +1715,36 @@ mod tests {
             &[json(r#"{"sources":[1]}"#), json(r#"{"sources":[2]}"#)],
         );
         assert_eq!(parse(atlas.unwrap()), serde_json::json!({"sources":[1,2]}));
+        // BlockStateModelLoader: every definition kept, bottom first, for the
+        // catalog to bind one by one; one that does not parse is skipped.
+        let gate = merge(
+            Merge::BlockStates,
+            &[
+                json(r#"{"variants":{"":{"model":"v"}}}"#),
+                b"not json".to_vec(),
+                json(r#"{"variants":{"powered=true":{"model":"p"}}}"#),
+            ],
+        );
+        assert_eq!(
+            parse(gate.unwrap()),
+            serde_json::json!({BLOCKSTATE_LAYERS:[
+                {"variants":{"":{"model":"v"}}},
+                {"variants":{"powered=true":{"model":"p"}}}
+            ]})
+        );
+        // A single definition stays the file as it is.
+        let alone = merge(
+            Merge::BlockStates,
+            &[json(r#"{"variants":{"":{"model":"p"}}}"#)],
+        );
+        assert_eq!(
+            parse(alone.unwrap()),
+            serde_json::json!({"variants":{"":{"model":"p"}}})
+        );
+        assert_eq!(
+            merge_kind("assets/minecraft/blockstates/oak_fence_gate.json"),
+            Some(Merge::BlockStates)
+        );
         assert_eq!(
             merge_kind("assets/minecraft/lang/en_us.json"),
             Some(Merge::Lang)
@@ -938,8 +1765,64 @@ mod tests {
         assert_eq!(merge_kind("assets/minecraft/models/block/stone.json"), None);
     }
     #[test]
+    fn companion_maps_follow_the_winning_colour_or_a_higher_map_only_pack() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-material-owner-{}", std::process::id()));
+        let vanilla = root.join("vanilla");
+        let relative = "assets/minecraft/textures/block";
+        fs::create_dir_all(vanilla.join(relative)).unwrap();
+        let names = ["stone.png", "stone_n.png", "stone_s.png"];
+        for name in names {
+            fs::write(vanilla.join(relative).join(name), b"base").unwrap();
+        }
+        for (pack, files) in [
+            ("low", vec!["stone_n.png", "stone_s.png"]),
+            ("colour", vec!["stone.png"]),
+            ("maps", vec!["stone_n.png"]),
+        ] {
+            let dir = root.join("packs").join(pack);
+            fs::create_dir_all(dir.join(relative)).unwrap();
+            fs::write(
+                dir.join("pack.mcmeta"),
+                br#"{"pack":{"description":"fixture","pack_format":97}}"#,
+            )
+            .unwrap();
+            for name in files {
+                fs::write(dir.join(relative).join(name), pack.as_bytes()).unwrap();
+            }
+        }
+        let all = discover(&vanilla, &root.join("packs"));
+        let order = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| {
+                    all.iter()
+                        .find(|p| p.id == format!("file/{name}"))
+                        .unwrap()
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        let out = root.join("out");
+        build_overlay(&vanilla, &order(&["low", "colour"]), &out).unwrap();
+        assert_eq!(
+            fs::read(out.join(relative).join("stone.png")).unwrap(),
+            b"colour"
+        );
+        assert!(!out.join(relative).join("stone_n.png").exists());
+        assert!(!out.join(relative).join("stone_s.png").exists());
+        build_overlay(&vanilla, &order(&["low", "colour", "maps"]), &out).unwrap();
+        assert_eq!(
+            fs::read(out.join(relative).join("stone_n.png")).unwrap(),
+            b"maps"
+        );
+        assert!(!out.join(relative).join("stone_s.png").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn overlay_layers_packs_over_vanilla() {
-        let base = std::env::temp_dir().join(format!("horizon-packs-{}", std::process::id()));
+        // `&` would split an unquoted `cmd /C mklink` line.
+        let base = std::env::temp_dir().join(format!("horizon-packs-&{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let vanilla = base.join("vanilla");
         fs::create_dir_all(vanilla.join("assets/minecraft/textures/block")).unwrap();
@@ -960,6 +1843,13 @@ mod tests {
         )
         .unwrap();
         fs::write(vanilla.join("facts.json"), b"[]").unwrap();
+        // A directory no pack touches (#1688: a font json names sheets in it).
+        fs::create_dir_all(vanilla.join("assets/minecraft/textures/font")).unwrap();
+        fs::write(
+            vanilla.join("assets/minecraft/textures/font/ascii.png"),
+            b"font",
+        )
+        .unwrap();
         let pack_dir = base.join("packs/Mine");
         fs::create_dir_all(pack_dir.join("assets/minecraft/textures/block")).unwrap();
         fs::write(
@@ -997,6 +1887,204 @@ mod tests {
             br#"{"a":"vanilla","b":"pack"}"#
         );
         assert_eq!(fs::read(out.join("facts.json")).unwrap(), b"[]");
+        assert_eq!(
+            fs::read(out.join("assets/minecraft/textures/font/ascii.png")).unwrap(),
+            b"font"
+        );
+        // Linked, not mirrored: a junction on Windows, a symlink on unix.
+        assert!(
+            fs::symlink_metadata(out.join("assets/minecraft/textures/font"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+    #[test]
+    fn every_file_of_a_big_stack_comes_from_its_top_pack() {
+        use std::io::Write as _;
+        let base = std::env::temp_dir().join(format!("horizon-pack-stack-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let vanilla = base.join("vanilla");
+        // Folders whose names start alike (`item`, `item_extra`, `item2`) and files beside
+        // folders of almost their name: what a prefix lookup could mix up.
+        let names: Vec<String> = (0..400)
+            .map(|i| {
+                let folder = ["item", "item_extra", "item2", "item/sub", "block"][i % 5];
+                format!("assets/ns{}/textures/{folder}/f{i}.png", i % 3)
+            })
+            .chain(["assets/ns0/textures/item.png".to_owned()])
+            .collect();
+        let mut expected: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for name in names.iter().step_by(4) {
+            let path = vanilla.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, format!("vanilla {name}")).unwrap();
+            expected.insert(name.clone(), format!("vanilla {name}").into_bytes());
+        }
+        let meta = br#"{"pack":{"description":"d","pack_format":97}}"#;
+        // Packs a and b are zips, c a folder; each provides a different part of the names.
+        fs::create_dir_all(base.join("packs/c")).unwrap();
+        fs::write(base.join("packs/c/pack.mcmeta"), meta).unwrap();
+        for (pack, every) in [("a", 2), ("b", 3)] {
+            let file = fs::File::create(base.join(format!("packs/{pack}.zip"))).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("pack.mcmeta", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(meta).unwrap();
+            for name in names.iter().step_by(every) {
+                zip.start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(format!("{pack} {name}").as_bytes()).unwrap();
+                expected.insert(name.clone(), format!("{pack} {name}").into_bytes());
+            }
+            zip.finish().unwrap();
+        }
+        for name in names.iter().skip(1).step_by(5) {
+            let path = base.join("packs/c").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, format!("c {name}")).unwrap();
+            expected.insert(name.clone(), format!("c {name}").into_bytes());
+        }
+        let all = folder(&base.join("packs"), RESOURCE_FORMAT);
+        let ids = ["file/a.zip", "file/b.zip", "file/c"].map(String::from);
+        let out = base.join("overlay");
+        build_overlay(&vanilla, &enabled(&all, &ids), &out).unwrap();
+        fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    let name = path.strip_prefix(root).unwrap().to_string_lossy();
+                    out.insert(name.replace('\\', "/"), fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut built = BTreeMap::new();
+        walk(&out.join("assets"), &out, &mut built);
+        assert_eq!(built, expected);
+        let _ = fs::remove_dir_all(base);
+    }
+    #[test]
+    fn a_pack_that_unpacks_past_its_budget_fails_and_leaves_nothing() {
+        use std::io::Write as _;
+        let base = std::env::temp_dir().join(format!("horizon-pack-bomb-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let vanilla = base.join("vanilla");
+        fs::create_dir_all(vanilla.join("assets/minecraft/textures/block")).unwrap();
+        fs::write(
+            vanilla.join("assets/minecraft/textures/block/stone.png"),
+            b"vanilla",
+        )
+        .unwrap();
+        fs::create_dir_all(base.join("packs")).unwrap();
+        let pack = |name: &str, files: &[(&str, usize)]| {
+            let path = base.join("packs").join(name);
+            let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+            let deflated = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("pack.mcmeta", deflated).unwrap();
+            zip.write_all(br#"{"pack":{"description":"d","pack_format":97}}"#)
+                .unwrap();
+            let zeros = vec![0u8; 1 << 20];
+            for (file, mib) in files {
+                zip.start_file(*file, deflated).unwrap();
+                for _ in 0..*mib {
+                    zip.write_all(&zeros).unwrap();
+                }
+            }
+            zip.finish().unwrap();
+            fs::metadata(&path).unwrap().len()
+        };
+        // Four 24 MiB files of zeros: well under the per-file limit, 96 MiB in all from a zip of
+        // a few hundred KiB, past the 64 MiB a small pack may unpack to.
+        let size = pack(
+            "bomb.zip",
+            &[
+                ("assets/minecraft/textures/block/a.png", 24),
+                ("assets/minecraft/textures/block/b.png", 24),
+                ("assets/minecraft/textures/block/c.png", 24),
+                ("assets/minecraft/textures/block/d.png", 24),
+            ],
+        );
+        assert!(size < 1 << 20, "the bomb is small: {size} bytes");
+        let packs = discover(&vanilla, &base.join("packs"));
+        assert_eq!(packs.len(), 1);
+        let out = base.join("overlay");
+        let error = build_overlay(&vanilla, &packs, &out).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge, "{error}");
+        assert!(
+            !out.exists(),
+            "what was unpacked before the budget ran out stays"
+        );
+        // The same files within the budget unpack whole.
+        fs::remove_file(base.join("packs/bomb.zip")).unwrap();
+        pack(
+            "fine.zip",
+            &[
+                ("assets/minecraft/textures/block/a.png", 24),
+                ("assets/minecraft/textures/block/b.png", 24),
+            ],
+        );
+        let packs = discover(&vanilla, &base.join("packs"));
+        build_overlay(&vanilla, &packs, &out).unwrap();
+        assert_eq!(
+            fs::metadata(out.join("assets/minecraft/textures/block/b.png"))
+                .unwrap()
+                .len(),
+            24 << 20
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+    #[test]
+    fn zip_entries_never_leave_the_overlay() {
+        use std::io::Write as _;
+        let base = std::env::temp_dir().join(format!("horizon-pack-escape-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let vanilla = base.join("vanilla");
+        fs::create_dir_all(vanilla.join("assets/minecraft/textures/block")).unwrap();
+        fs::write(
+            vanilla.join("assets/minecraft/textures/block/stone.png"),
+            b"vanilla",
+        )
+        .unwrap();
+        fs::create_dir_all(base.join("packs")).unwrap();
+        let mut zip = zip::ZipWriter::new(fs::File::create(base.join("packs/evil.zip")).unwrap());
+        for (name, data) in [
+            (
+                "pack.mcmeta",
+                &br#"{"pack":{"description":"d","pack_format":97}}"#[..],
+            ),
+            ("assets/minecraft/textures/block/stone.png", b"pack"),
+            ("assets/../../escaped.txt", b"out"),
+            ("assets/minecraft/../../../escaped_lang.json", b"{}"),
+            ("assets\\..\\..\\escaped_backslash.txt", b"out"),
+            ("assets/./minecraft/dot.txt", b"in"),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+        let packs = discover(&vanilla, &base.join("packs"));
+        assert_eq!(packs.len(), 1);
+        let out = base.join("work/overlay");
+        build_overlay(&vanilla, &packs, &out).unwrap();
+        assert_eq!(
+            fs::read(out.join("assets/minecraft/textures/block/stone.png")).unwrap(),
+            b"pack"
+        );
+        for escaped in [
+            "escaped.txt",
+            "escaped_lang.json",
+            "escaped_backslash.txt",
+            "work/escaped.txt",
+            "work/escaped_lang.json",
+            "work/escaped_backslash.txt",
+        ] {
+            assert!(!base.join(escaped).exists(), "{escaped} was written");
+        }
         let _ = fs::remove_dir_all(base);
     }
     #[test]
@@ -1039,6 +2127,36 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
     #[test]
+    fn polytone_conditions_turn_overlays_on_from_the_packs_configs() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-packs-polytone-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let configs = dir.join("assets/mypack/polytone/config_entries");
+        fs::create_dir_all(&configs).unwrap();
+        fs::write(configs.join("fog.json"), r#"{"default_value": "ON"}"#).unwrap();
+        fs::write(
+            configs.join("birds.json"),
+            r#"{"default_value": 0, "max": 300}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("pack.mcmeta"),
+            r#"{"pack":{"description":"p","pack_format":97},"overlays":{"entries":[
+                {"directory":"opt_fog","formats":[0,0],"polytone_condition":"config('mypack:fog') == 'ON'"},
+                {"directory":"opt_birds","formats":[0,0],"polytone_condition":"config('mypack:birds') > 0"},
+                {"directory":"opt_plain","formats":[0,0]}]}}"#,
+        )
+        .unwrap();
+        let pack = pack(
+            "file/p".into(),
+            Text::literal("p"),
+            Source::Dir(dir.clone()),
+        )
+        .unwrap();
+        assert_eq!(pack.overlays, ["opt_fog"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+    #[test]
     fn overlays_and_filters() {
         let v = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
         let meta = v(r#"{"overlays":{"entries":[
@@ -1046,7 +2164,16 @@ mod tests {
             {"formats":{"min_inclusive":97,"max_inclusive":97},"directory":"new"},
             {"min_format":97,"max_format":[97,5],"directory":"also"},
             {"formats":50,"directory":"no"}]}}"#);
-        assert_eq!(overlays_of(&meta), ["new", "also"]);
+        assert_eq!(overlays_of(&meta, &Default::default()), ["new", "also"]);
+        // Only one plain folder of the pack, as vanilla's DIR_VALIDATOR has it.
+        let meta = v(r#"{"overlays":{"entries":[
+            {"formats":97,"directory":".."},
+            {"formats":97,"directory":"../outside"},
+            {"formats":97,"directory":"/etc"},
+            {"formats":97,"directory":"a/b"},
+            {"formats":97,"directory":"C:"},
+            {"formats":97,"directory":"ok_1.21-x"}]}}"#);
+        assert_eq!(overlays_of(&meta, &Default::default()), ["ok_1.21-x"]);
         let base = std::env::temp_dir().join(format!("horizon-packs-ov-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let vanilla = base.join("vanilla");

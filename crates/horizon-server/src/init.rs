@@ -3,7 +3,7 @@
 //! Every question has a flag, so it also runs unattended (Docker, scripts).
 
 use crate::{config, config::Config, engine};
-use horizon_server_files::{
+use horizon_platform::server_files::{
     eula,
     java_properties::now_millis,
     user_lists::{OpEntry, OpList, WhiteEntry, WhiteList},
@@ -209,7 +209,12 @@ pub fn run(dir: &Path, answers: Answers) -> Result<(), String> {
                 println!("Warning: {e}");
             }
             match engine::resources(&cfg, dir, Some(&program)) {
-                Ok(resources) => println!("Game files: {}", resources.display()),
+                Ok(resources) => {
+                    println!("Game files: {}", resources.display());
+                    if let Err(e) = engine::check_prepared(&resources) {
+                        println!("Warning: {e}");
+                    }
+                }
                 Err(e) => println!("{e}"),
             }
         }
