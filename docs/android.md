@@ -87,10 +87,10 @@ rustup target add aarch64-linux-android
 android/build.sh
 ```
 
-It needs clang and lld, the Android SDK and NDK (`ANDROID_HOME`), a JDK
-for Gradle, xz, zip and python3. The NDK's own clang is an x86_64 program,
-so `android/tools/ndk-clang` runs the host's clang against the NDK's
-sysroot and any host can build the app. On an aarch64 host qemu runs the
+It needs the Android SDK and NDK (`ANDROID_HOME`), a JDK for Gradle, xz,
+zip and python3. `android/tools/ndk-clang` uses the host clang when there
+is one and the NDK's own clang otherwise, against the NDK's sysroot, so a
+Linux x86_64 host needs no system LLVM. On an aarch64 host qemu runs the
 SDK's aapt2.
 
 The APK lands in `android/build/`. Set `HORIZON_ANDROID_KEYSTORE`,

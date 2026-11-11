@@ -2,7 +2,10 @@
 tools=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
 export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/android-sdk}}"
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$(printf "%s\n" "$ANDROID_HOME"/ndk/* | sort -V | tail -n 1)}"
+ndk_bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+export HOST_CLANG="${HOST_CLANG:-$(command -v clang || printf '%s\n' "$ndk_bin/clang")}"
+export HOST_AR="${HOST_AR:-$(command -v llvm-ar || printf '%s\n' "$ndk_bin/llvm-ar")}"
 export CC_aarch64_linux_android="$tools/ndk-clang"
 export CXX_aarch64_linux_android="$tools/ndk-clang"
-export AR_aarch64_linux_android="${HOST_AR:-$(command -v llvm-ar || printf "%s\n" /usr/bin/llvm-ar-* | sort -V | tail -n 1)}"
+export AR_aarch64_linux_android="$HOST_AR"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$tools/ndk-clang"

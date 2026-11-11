@@ -39,12 +39,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: The aarch64 Linux linker
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          timeout 10m sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -o Acquire::Retries=3 update -y
-          timeout 10m sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -o Acquire::Retries=3 install -y --no-install-recommends gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --locked -p cargo-horizon-mod --target ${{ matrix.target }}
       - name: It starts

@@ -18,7 +18,7 @@ MANIFEST = ROOT / "crates/cargo-horizon-mod/Cargo.toml"
 # runner can start the binary (a cross build cannot).
 PLATFORMS = [
     {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-22.04", "run": True},
-    {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-22.04", "run": False},
+    {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "run": True},
     {"target": "x86_64-pc-windows-msvc", "os": "windows-latest", "run": True},
     {"target": "x86_64-apple-darwin", "os": "macos-latest", "run": True},
     {"target": "aarch64-apple-darwin", "os": "macos-latest", "run": True},

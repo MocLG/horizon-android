@@ -7,9 +7,10 @@
 #   android/release.sh          then publishes it for the app's updater
 #   HORIZON_ANDROID_KEYSTORE=... signs it with your key (else the debug key)
 #
-# Needs Rust with the aarch64-linux-android target, clang and lld, the
-# Android SDK and NDK (ANDROID_HOME), JDK 17 or newer for Gradle, xz, zip
-# and python3. On a host whose SDK tools are x86_64 only, qemu runs aapt2.
+# Needs Rust with the aarch64-linux-android target, the Android SDK and NDK
+# (ANDROID_HOME; the NDK's clang, lld and llvm-strip do the work), JDK 17 or
+# newer for Gradle, xz, zip and python3. On a host whose SDK tools are x86_64
+# only, qemu runs aapt2.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -39,7 +40,8 @@ export HORIZON_MSA_CLIENT_ID="${HORIZON_MSA_CLIENT_ID:-5be5d759-7f2f-4790-be62-4
 rm -rf "$stage"
 mkdir -p "$stage/jniLibs/arm64-v8a" "$stage/assets" "$cache"
 libs="$stage/jniLibs/arm64-v8a"
-strip=$(command -v llvm-strip || printf '%s\n' /usr/bin/llvm-strip-* | sort -V | tail -n 1)
+strip=${HOST_STRIP:-$(command -v llvm-strip || true)}
+[ -n "$strip" ] || strip="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
 
 echo "== The game ($HORIZON_ANDROID_BUILD)"
 cargo build --manifest-path "$repo/Cargo.toml" -p horizon-client --example horizon \
