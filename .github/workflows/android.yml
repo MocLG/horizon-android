@@ -76,6 +76,12 @@ jobs:
             echo "HORIZON_ANDROID_KEY_ALIAS=${HORIZON_ANDROID_KEY_ALIAS}"
           } >> "$GITHUB_ENV"
 
+      - name: Fetch Gradle wrapper
+        run: |
+          jar=android/gradle/wrapper/gradle-wrapper.jar
+          curl -fsSL -o "$jar" https://raw.githubusercontent.com/gradle/gradle/v8.14.5/gradle/wrapper/gradle-wrapper.jar
+          echo "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172  $jar" | sha256sum -c -
+
       - name: Build APK
         run: android/build.sh
 
