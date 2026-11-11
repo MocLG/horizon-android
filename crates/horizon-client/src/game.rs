@@ -55,6 +55,8 @@ mod advancements_screen;
 mod agent;
 mod agent_settings;
 mod allays;
+#[cfg(target_os = "android")]
+pub(crate) mod android;
 mod armor_stands;
 mod atlas_slots;
 mod attachment_sync;
