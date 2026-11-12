@@ -213,9 +213,13 @@ impl Game<'_> {
             } else {
                 None
             };
-            self.captured = self.capture_mode.is_some()
-                // A touch screen has no pointer to grab: the look is always the game's.
-                || cfg!(target_os = "android");
+            // A touch screen has no pointer to grab: the look is always the game's, and the
+            // mode says so, as `settle_after_run` holds the grab and the mode together.
+            #[cfg(target_os = "android")]
+            if self.capture_mode.is_none() {
+                self.capture_mode = Some(CursorGrabMode::Confined);
+            }
+            self.captured = self.capture_mode.is_some();
             // Windows already warped above, inside the clip's own position.
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             if self.captured && self.focused {
