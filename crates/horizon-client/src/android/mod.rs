@@ -52,6 +52,7 @@ pub fn main(app: AndroidApp) {
         let _ = std::fs::write(options, "renderDistance:8\nsimulationDistance:6\n");
     }
     horizon_client::telemetry::mark_start();
+    crate::entry::android_setup();
     horizon_client::logging::init(&paths.home, "Render thread");
     horizon_client::crash::install(paths.home.clone(), "client");
     jni::install_clipboard();

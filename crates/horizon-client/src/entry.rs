@@ -6,6 +6,22 @@ pub fn main() {
     main_with(Default::default());
 }
 
+/// The engine's startup the Android app shares with [`main_with`]: the menus' look and fonts,
+/// the pack formats, the hooks sealed and the crates' language files. It has no mods.
+#[cfg(target_os = "android")]
+pub(crate) fn android_setup() {
+    crate::horizon_look::give();
+    horizon_client::pack_formats::install();
+    if !cfg!(feature = "horizon-extras") {
+        horizon_client::options_ui::HORIZON_EXTRAS
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    game::player_hooks::register();
+    horizon_hooks::engine::seal();
+    horizon_client::lang::install_crate_files(horizon_hooks::lang::engine::all());
+    horizon_client::spans::startup::init(std::time::Instant::now());
+}
+
 /// Start the game with trait mods in dispatch order.
 pub fn main_with(mods: crate::mod_api::Mods) {
     // First: a trait injection into anything below (logging, the crash handler) calls its mod.
