@@ -92,6 +92,20 @@ fn main() {
             .chain(rest)
             .collect();
     }
+    // The app's folders, as JVM properties here because the preparation
+    // clears the variables that carry them (JDK_JAVA_OPTIONS), and `/tmp`
+    // is not the app's. Options given on the command line come later and win.
+    let properties = [
+        ("java.io.tmpdir", "TMPDIR"),
+        ("user.home", "HOME"),
+    ]
+    .into_iter()
+    .filter_map(|(property, var)| {
+        let value = std::env::var_os(var)?;
+        CString::new([format!("-D{property}=").as_bytes(), value.as_encoded_bytes()].concat()).ok()
+    })
+    .chain([CString::from(c"-Djava.awt.headless=true")]);
+    args.splice(0..0, properties.collect::<Vec<_>>());
     args.insert(0, CString::from(c"java"));
     let mut argv: Vec<*mut c_char> = args.iter_mut().map(|a| a.as_ptr().cast_mut()).collect();
     argv.push(std::ptr::null_mut());
