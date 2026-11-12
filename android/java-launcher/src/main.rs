@@ -80,10 +80,17 @@ fn main() {
         .map(|a| CString::new(a.into_encoded_bytes()).unwrap())
         .collect();
     if javac {
-        args.splice(
-            0..0,
-            [c"-m", c"jdk.compiler/com.sun.tools.javac.Main"].map(CString::from),
-        );
+        // `-J` options are the JVM's, as in bin/javac: they go before the
+        // main module, which would reject them as compiler flags.
+        let (jvm, rest): (Vec<_>, Vec<_>) = args
+            .into_iter()
+            .partition(|a| a.to_bytes().starts_with(b"-J"));
+        args = jvm
+            .into_iter()
+            .map(|a| CString::new(&a.to_bytes()[2..]).unwrap())
+            .chain([c"-m", c"jdk.compiler/com.sun.tools.javac.Main"].map(CString::from))
+            .chain(rest)
+            .collect();
     }
     args.insert(0, CString::from(c"java"));
     let mut argv: Vec<*mut c_char> = args.iter_mut().map(|a| a.as_ptr().cast_mut()).collect();
